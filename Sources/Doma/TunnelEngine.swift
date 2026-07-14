@@ -1,0 +1,425 @@
+import Foundation
+
+enum TunnelEngine {
+    private static let ssh = "/usr/bin/ssh"
+    private static let lsof = "/usr/sbin/lsof"
+    private static let bindAddress = "127.0.0.1"
+    private static let forwardLimit = 128
+    private static let disappearGrace: TimeInterval = 10
+
+    private struct ListenerInfo {
+        var pids: Set<Int> = []
+        var namesByPID: [Int: Set<String>] = [:]
+    }
+
+    private struct RawListener {
+        let port: Int
+        let pid: Int?
+        let command: String?
+    }
+
+    private struct DockerInfo {
+        let container: String
+        let project: String
+        let service: String
+    }
+
+    private struct ProcessInfo {
+        let command: String
+        let arguments: String
+    }
+
+    static func socketPath(for host: String) -> String {
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Doma/cm", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        return cache.appendingPathComponent(String(format: "%016llx", fnv1a(host))).path
+    }
+
+    static func stopMaster(host: String) {
+        let socket = socketPath(for: host)
+        _ = CommandRunner.run(
+            ssh,
+            arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "exit", host],
+            timeout: 5
+        )
+        try? FileManager.default.removeItem(atPath: socket)
+    }
+
+    static func cycle(_ input: CycleInput) -> CycleResult {
+        let socket = socketPath(for: input.host)
+        guard let masterPID = ensureMaster(host: input.host, socket: socket) else {
+            return CycleResult(
+                state: .failed,
+                masterPID: nil,
+                activeForwards: [],
+                conflicts: [],
+                missingSince: [:],
+                services: [],
+                remoteCount: 0,
+                error: "Не удалось установить SSH-соединение"
+            )
+        }
+
+        let inventoryResult = queryInventory(host: input.host, socket: socket)
+        guard inventoryResult.status == 0 else {
+            let error = lastLine(inventoryResult.stderr.isEmpty ? inventoryResult.stdout : inventoryResult.stderr)
+            return CycleResult(
+                state: .failed,
+                masterPID: masterPID,
+                activeForwards: input.activeForwards,
+                conflicts: [],
+                missingSince: input.missingSince,
+                services: [],
+                remoteCount: 0,
+                error: error.isEmpty ? "Не удалось получить список портов" : error
+            )
+        }
+
+        let inventory = parseInventory(inventoryResult.stdout)
+        let remotePorts = Set(inventory.listeners.map(\.port).filter { 1024...32767 ~= $0 })
+        let local = localListeners()
+
+        var active = input.previousMasterPID == masterPID ? input.activeForwards : []
+        var conflicts = Set<Int>()
+        var missingSince = input.previousMasterPID == masterPID ? input.missingSince : [:]
+
+        for port in Array(active) where !ownsForward(port: port, masterPID: masterPID, listeners: local) {
+            active.remove(port)
+            missingSince.removeValue(forKey: port)
+        }
+
+        let now = Date()
+        for port in Array(active.subtracting(remotePorts)) {
+            let missingAt = missingSince[port] ?? now
+            missingSince[port] = missingAt
+            guard now.timeIntervalSince(missingAt) >= disappearGrace else { continue }
+
+            let result = control(host: input.host, socket: socket, operation: "cancel", port: port)
+            if result.status == 0 {
+                active.remove(port)
+                missingSince.removeValue(forKey: port)
+            }
+        }
+
+        for port in active.intersection(remotePorts) {
+            missingSince.removeValue(forKey: port)
+        }
+
+        for port in remotePorts.sorted() where !active.contains(port) {
+            guard active.count < forwardLimit else { break }
+
+            if ownsForward(port: port, masterPID: masterPID, listeners: local) {
+                active.insert(port)
+                continue
+            }
+
+            if !(local[port]?.pids.isEmpty ?? true) {
+                conflicts.insert(port)
+                continue
+            }
+
+            let result = control(host: input.host, socket: socket, operation: "forward", port: port)
+            if result.status == 0 {
+                active.insert(port)
+            } else {
+                conflicts.insert(port)
+            }
+        }
+
+        let services = makeServices(
+            inventory: inventory,
+            remotePorts: remotePorts,
+            active: active,
+            conflicts: conflicts
+        )
+
+        return CycleResult(
+            state: .connected,
+            masterPID: masterPID,
+            activeForwards: active,
+            conflicts: conflicts,
+            missingSince: missingSince,
+            services: services,
+            remoteCount: remotePorts.count,
+            error: nil
+        )
+    }
+
+    private static func fnv1a(_ value: String) -> UInt64 {
+        value.utf8.reduce(14695981039346656037) { hash, byte in
+            (hash ^ UInt64(byte)) &* 1099511628211
+        }
+    }
+
+    private static func ensureMaster(host: String, socket: String) -> Int? {
+        if let pid = checkMaster(host: host, socket: socket) {
+            return pid
+        }
+
+        cleanupSocket(socket)
+        let result = CommandRunner.run(
+            ssh,
+            arguments: [
+                "-fMN",
+                "-S", socket,
+                "-o", "ControlMaster=yes",
+                "-o", "ControlPersist=yes",
+                "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=3",
+                "-o", "TCPKeepAlive=yes",
+                "-o", "BatchMode=yes",
+                host,
+            ],
+            timeout: 12
+        )
+        guard result.status == 0 else { return nil }
+
+        for _ in 0..<20 {
+            if let pid = checkMaster(host: host, socket: socket) {
+                return pid
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        return nil
+    }
+
+    private static func checkMaster(host: String, socket: String) -> Int? {
+        let result = CommandRunner.run(
+            ssh,
+            arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "check", host],
+            timeout: 5
+        )
+        guard result.status == 0 else { return nil }
+        return firstCapture(in: result.stdout + result.stderr, pattern: #"pid=(\d+)"#).flatMap(Int.init)
+    }
+
+    private static func cleanupSocket(_ socket: String) {
+        let manager = FileManager.default
+        try? manager.removeItem(atPath: socket)
+        let directory = URL(fileURLWithPath: socket).deletingLastPathComponent()
+        let prefix = URL(fileURLWithPath: socket).lastPathComponent + "."
+        for candidate in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? []
+        where candidate.hasPrefix(prefix) {
+            try? manager.removeItem(at: directory.appendingPathComponent(candidate))
+        }
+    }
+
+    private static func control(host: String, socket: String, operation: String, port: Int) -> CommandResult {
+        CommandRunner.run(
+            ssh,
+            arguments: [
+                "-S", socket,
+                "-o", "ControlMaster=no",
+                "-O", operation,
+                "-L", "\(bindAddress):\(port):localhost:\(port)",
+                host,
+            ],
+            timeout: 5
+        )
+    }
+
+    private static func queryInventory(host: String, socket: String) -> CommandResult {
+        let script = #"""
+        printf '__SS__\n'
+        ss -H -ltnp 2>/dev/null
+        printf '__DOCKER__\n'
+        if command -v docker >/dev/null 2>&1; then
+          docker ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}' 2>/dev/null
+        fi
+        printf '__PS__\n'
+        ps -eo pid=,comm=,args= 2>/dev/null
+        printf '__CWD__\n'
+        for link in /proc/[0-9]*/cwd; do
+          pid=${link#/proc/}
+          pid=${pid%/cwd}
+          cwd=$(readlink "$link" 2>/dev/null) || continue
+          printf '%s|%s\n' "$pid" "$cwd"
+        done
+        """#
+
+        return CommandRunner.run(
+            ssh,
+            arguments: [
+                "-S", socket,
+                "-o", "ControlMaster=no",
+                "-o", "ConnectTimeout=5",
+                host,
+                "--", "sh", "-s",
+            ],
+            stdin: script,
+            timeout: 10
+        )
+    }
+
+    private static func localListeners() -> [Int: ListenerInfo] {
+        let result = CommandRunner.run(
+            lsof,
+            arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpfn"],
+            timeout: 5
+        )
+        guard result.status == 0 else { return [:] }
+
+        var currentPID: Int?
+        var listeners: [Int: ListenerInfo] = [:]
+        for line in result.stdout.split(whereSeparator: \.isNewline).map(String.init) {
+            if line.hasPrefix("p") {
+                currentPID = Int(line.dropFirst())
+            } else if line.hasPrefix("n"),
+                      let pid = currentPID,
+                      let port = firstCapture(in: line, pattern: #":(\d+)$"#).flatMap(Int.init) {
+                var info = listeners[port] ?? ListenerInfo()
+                info.pids.insert(pid)
+                info.namesByPID[pid, default: []].insert(String(line.dropFirst()))
+                listeners[port] = info
+            }
+        }
+        return listeners
+    }
+
+    private static func ownsForward(port: Int, masterPID: Int, listeners: [Int: ListenerInfo]) -> Bool {
+        guard let info = listeners[port], info.pids.contains(masterPID) else { return false }
+        return info.namesByPID[masterPID, default: []].contains {
+            $0 == "\(bindAddress):\(port)" || $0.hasSuffix("\(bindAddress):\(port)")
+        }
+    }
+
+    private struct Inventory {
+        var listeners: [RawListener] = []
+        var dockerByPort: [Int: DockerInfo] = [:]
+        var processes: [Int: ProcessInfo] = [:]
+        var cwdByPID: [Int: String] = [:]
+    }
+
+    private static func parseInventory(_ output: String) -> Inventory {
+        enum Section { case none, ss, docker, ps, cwd }
+        var section = Section.none
+        var inventory = Inventory()
+
+        for line in output.split(whereSeparator: \.isNewline).map(String.init) {
+            switch line {
+            case "__SS__": section = .ss
+            case "__DOCKER__": section = .docker
+            case "__PS__": section = .ps
+            case "__CWD__": section = .cwd
+            default:
+                switch section {
+                case .ss:
+                    let fields = line.split(whereSeparator: \.isWhitespace).map(String.init)
+                    guard fields.count >= 4,
+                          let port = firstCapture(in: fields[3], pattern: #":(\d+)$"#).flatMap(Int.init)
+                    else { continue }
+                    let pid = firstCapture(in: line, pattern: #"pid=(\d+)"#).flatMap(Int.init)
+                    let command = firstCapture(in: line, pattern: #"\(\(\"([^\"]+)\""#)
+                    inventory.listeners.append(RawListener(port: port, pid: pid, command: command))
+                case .docker:
+                    let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                    guard fields.count >= 4 else { continue }
+                    let info = DockerInfo(container: fields[0], project: fields[2], service: fields[3])
+                    for port in captures(in: fields[1], pattern: #"(?:^|,\s)(?:[^,]*:)?(\d+)->\d+/tcp"#).compactMap(Int.init) {
+                        inventory.dockerByPort[port] = info
+                    }
+                case .ps:
+                    guard let groups = captureGroups(in: line, pattern: #"^\s*(\d+)\s+(\S+)\s+(.*)$"#),
+                          let pid = Int(groups[0])
+                    else { continue }
+                    inventory.processes[pid] = ProcessInfo(command: groups[1], arguments: groups[2])
+                case .cwd:
+                    let fields = line.split(separator: "|", maxSplits: 1).map(String.init)
+                    if fields.count == 2, let pid = Int(fields[0]) {
+                        inventory.cwdByPID[pid] = fields[1]
+                    }
+                case .none:
+                    break
+                }
+            }
+        }
+        return inventory
+    }
+
+    private static func makeServices(
+        inventory: Inventory,
+        remotePorts: Set<Int>,
+        active: Set<Int>,
+        conflicts: Set<Int>
+    ) -> [RemoteService] {
+        let listenerByPort = Dictionary(inventory.listeners.map { ($0.port, $0) }, uniquingKeysWith: { first, _ in first })
+
+        return remotePorts.sorted().map { port in
+            let listener = listenerByPort[port]
+            let process = listener?.pid.flatMap { inventory.processes[$0] }
+            let cwd = listener?.pid.flatMap { inventory.cwdByPID[$0] }
+
+            let kind: ServiceKind
+            let group: String
+            let name: String
+            let details: String
+
+            if let docker = inventory.dockerByPort[port] {
+                kind = .docker
+                group = docker.project.isEmpty ? "Docker" : docker.project
+                name = docker.service.isEmpty ? docker.container : docker.service
+                details = docker.container
+            } else {
+                let arguments = process?.arguments ?? ""
+                let executable = (process?.command ?? listener?.command ?? "TCP").lowercased()
+                if arguments.lowercased().contains("vite") {
+                    kind = .vite
+                    group = cwd ?? "Vite"
+                    name = "Vite"
+                } else if executable.contains("node") {
+                    kind = .node
+                    group = cwd ?? "Node"
+                    name = "Node"
+                } else if executable.contains("python") {
+                    kind = .python
+                    group = cwd ?? "Python"
+                    name = "Python"
+                } else {
+                    kind = .system
+                    group = "Другие сервисы"
+                    name = process?.command ?? listener?.command ?? "TCP"
+                }
+                details = arguments.isEmpty ? (cwd ?? "") : arguments
+            }
+
+            return RemoteService(
+                port: port,
+                name: name,
+                group: group,
+                kind: kind,
+                details: details,
+                isForwarded: active.contains(port),
+                hasConflict: conflicts.contains(port)
+            )
+        }
+    }
+
+    private static func firstCapture(in text: String, pattern: String) -> String? {
+        captureGroups(in: text, pattern: pattern)?.first
+    }
+
+    private static func captures(in text: String, pattern: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges > 1, let capture = Range(match.range(at: 1), in: text) else { return nil }
+            return String(text[capture])
+        }
+    }
+
+    private static func captureGroups(in text: String, pattern: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text))
+        else { return nil }
+
+        return (1..<match.numberOfRanges).compactMap { index in
+            guard let range = Range(match.range(at: index), in: text) else { return nil }
+            return String(text[range])
+        }
+    }
+
+    private static func lastLine(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
+    }
+}
