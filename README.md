@@ -25,3 +25,17 @@ open "$HOME/Applications/Doma.app"
 ```
 
 Doma binds forwarded ports only to `127.0.0.1`.
+
+## Installation from GitHub
+
+[Download the latest release](https://github.com/MrFlashAccount/doma/releases/latest), open the DMG, and drag
+`Doma.app` to `Applications`.
+
+Doma is ad-hoc signed but not notarized. macOS may warn on the first launch; use right click → **Open** to confirm
+that you want to run it.
+
+## Releases
+
+Releases are built by GitHub Actions on a macOS runner. Start the `Release` workflow manually and provide a semantic
+version such as `0.1.0`. The workflow builds and verifies an ad-hoc signed app, packages `Doma-<version>.dmg`, creates
+the matching `v<version>` tag, and publishes the DMG in a GitHub Release.
