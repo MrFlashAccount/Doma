@@ -51,7 +51,8 @@ struct DomaApp: App {
         MenuBarExtra {
             ContentView(manager: manager)
         } label: {
-            MenuBarIcon(state: manager.state)
+            Image(nsImage: MenuBarIcon.image(for: manager.state))
+                .renderingMode(.template)
                 .accessibilityLabel("Doma: \(manager.state.title)")
                 .help("Doma: \(manager.state.title)")
         }
