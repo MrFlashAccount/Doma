@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var manager: TunnelManager
+    @StateObject private var launchAtLogin = LaunchAtLoginController()
 
     @State private var query = ""
     @State private var hoveredPort: Int?
@@ -17,6 +18,19 @@ struct ContentView: View {
         }
         .frame(width: 400, height: 560)
         .background(.regularMaterial)
+        .onAppear {
+            launchAtLogin.refresh()
+        }
+        .alert(
+            "Не удалось изменить автозапуск",
+            isPresented: launchAtLoginErrorBinding
+        ) {
+            Button("OK", role: .cancel) {
+                launchAtLogin.clearError()
+            }
+        } message: {
+            Text(launchAtLogin.errorMessage ?? "Неизвестная ошибка")
+        }
     }
 
     private var header: some View {
@@ -187,6 +201,18 @@ struct ContentView: View {
             Spacer()
 
             Menu {
+                Toggle("Запускать при входе", isOn: launchAtLoginBinding)
+
+                if launchAtLogin.requiresApproval {
+                    Button {
+                        launchAtLogin.openLoginItemsSettings()
+                    } label: {
+                        Label("Разрешить автозапуск…", systemImage: "gear")
+                    }
+                }
+
+                Divider()
+
                 Button("Выйти из Doma", role: .destructive) {
                     manager.quit()
                 }
@@ -360,6 +386,24 @@ struct ContentView: View {
             }
             return filtered.isEmpty ? nil : (group, filtered)
         }
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLogin.isEnabled },
+            set: { launchAtLogin.setEnabled($0) }
+        )
+    }
+
+    private var launchAtLoginErrorBinding: Binding<Bool> {
+        Binding(
+            get: { launchAtLogin.errorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    launchAtLogin.clearError()
+                }
+            }
+        )
     }
 
     private func isGroupExpanded(_ group: String) -> Bool {

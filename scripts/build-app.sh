@@ -7,6 +7,7 @@ APP_DIR="$BUILD_DIR/Doma.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+ICON_SOURCE="$ROOT/Resources/AppIcon.icns"
 VERSION="${DOMA_VERSION:-0.1.0}"
 BUILD_NUMBER="${DOMA_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-1}}"
 
@@ -17,6 +18,7 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BUILD_DIR/Doma" "$MACOS_DIR/Doma"
 cp "$ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
+cp "$ICON_SOURCE" "$RESOURCES_DIR/Doma.icns"
 chmod 755 "$MACOS_DIR/Doma"
 
 /usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION" "$CONTENTS_DIR/Info.plist"

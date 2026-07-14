@@ -29,7 +29,10 @@ Doma binds forwarded ports only to `127.0.0.1`.
 ## Installation from GitHub
 
 [Download the latest release](https://github.com/MrFlashAccount/doma/releases/latest), open the DMG, and drag
-`Doma.app` to `Applications`.
+`Doma.app` onto `Applications`.
+
+To start Doma automatically after signing in, open the ellipsis menu and enable **Запускать при входе**. If
+macOS requires approval, Doma opens the Login Items settings page.
 
 Doma is ad-hoc signed but not notarized. macOS may warn on the first launch; use right click → **Open** to confirm
 that you want to run it.
