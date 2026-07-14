@@ -15,15 +15,24 @@ struct DomaApp: App {
         _manager = StateObject(wrappedValue: manager)
 
         #if DEBUG
-        if CommandLine.arguments.contains("--preview-window") {
+        if CommandLine.arguments.contains("--preview-window")
+            || CommandLine.arguments.contains("--preview-menubar-icon")
+        {
+            let isMenuBarPreview = CommandLine.arguments.contains("--preview-menubar-icon")
+            let content: AnyView = isMenuBarPreview
+                ? AnyView(MenuBarIconPreview())
+                : AnyView(ContentView(manager: manager))
+            let size = isMenuBarPreview
+                ? NSSize(width: 240, height: 112)
+                : NSSize(width: 400, height: 560)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 400, height: 560),
+                contentRect: NSRect(origin: .zero, size: size),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Doma — Preview"
-            window.contentView = NSHostingView(rootView: ContentView(manager: manager))
+            window.title = isMenuBarPreview ? "Doma — Menu Bar Icon" : "Doma — Preview"
+            window.contentView = NSHostingView(rootView: content)
             previewWindow = window
 
             DispatchQueue.main.async {
@@ -42,8 +51,9 @@ struct DomaApp: App {
         MenuBarExtra {
             ContentView(manager: manager)
         } label: {
-            Image(systemName: manager.state.symbol)
-                .symbolRenderingMode(.hierarchical)
+            MenuBarIcon(state: manager.state)
+                .accessibilityLabel("Doma: \(manager.state.title)")
+                .help("Doma: \(manager.state.title)")
         }
         .menuBarExtraStyle(.window)
     }
