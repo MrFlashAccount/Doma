@@ -1,44 +1,61 @@
-# Doma
+<div align="center">
+  <img src="docs/images/doma-icon.png" width="128" alt="Doma app icon">
+  <h1>Doma</h1>
+  <p><strong>Your remote services, right at home.</strong></p>
+  <p>
+    Doma mirrors TCP services from an SSH host to the same ports on
+    <code>127.0.0.1</code> — automatically, as they appear.
+  </p>
+  <p>
+    <a href="https://github.com/MrFlashAccount/Doma/releases/latest">
+      <img src="https://img.shields.io/github/v/release/MrFlashAccount/Doma?display_name=tag&sort=semver&label=Download&color=3B82F6" alt="Download the latest Doma release">
+    </a>
+    <img src="https://img.shields.io/badge/macOS-14%2B-2F3136" alt="Requires macOS 14 or newer">
+  </p>
+</div>
 
-**Doma** brings remote development services home to your Mac.
+<p align="center">
+  <img src="docs/images/doma-popover-hero.png" width="400" alt="Doma connected to a demo SSH host and forwarding mock services">
+</p>
 
-It is a native macOS menu bar app for automatic, lazy SSH port forwarding:
+## The same port, locally
 
-- Reads concrete aliases from `~/.ssh/config`.
-- Maintains an app-owned SSH ControlMaster without changing normal interactive SSH.
-- Mirrors remote TCP listeners from ports 1024–32767 to `127.0.0.1` with a 128-forward limit.
-- Groups Docker Compose services by project/service and detects Vite, Node, and Python processes.
-- Reconnects automatically and exposes manual reconnect/sync actions.
-- Opens forwarded services in the browser and groups them into collapsible projects.
+Start Docker, Vite, Node, Python, or any other TCP service on your remote machine. A moment later, open the same port on your Mac:
 
-## Requirements
-
-- macOS 14 or newer
-- Swift 5.10 or newer
-- OpenSSH and a working host alias in `~/.ssh/config`
-
-## Build and install
-
-```fish
-./scripts/build-app.fish
-open "$HOME/Applications/Doma.app"
+```text
+remote :12000  →  http://127.0.0.1:12000
 ```
 
-Doma binds forwarded ports only to `127.0.0.1`.
+There is no new `ssh -L` command and no tunnel restart. When the service disappears, Doma removes the forward after a short grace period.
 
-## Installation from GitHub
+## Everything in one menu
 
-[Download the latest release](https://github.com/MrFlashAccount/doma/releases/latest), open the DMG, and drag
-`Doma.app` onto `Applications`.
+- **See what is actually running.** Doma names Docker Compose services and recognizes Vite, Node, and Python processes.
+- **Keep large stacks readable.** Services are grouped into collapsible projects instead of becoming one long port list.
+- **Open a service with one click.** Select any forwarded service to open its local URL in your browser.
+- **Notice problems immediately.** Local port conflicts are shown separately instead of failing silently.
+- **Recover automatically.** Doma reconnects on its own and also gives you explicit reconnect and sync actions.
+- **Start with your Mac.** Enable launch at login and leave Doma in the menu bar.
 
-To start Doma automatically after signing in, open the ellipsis menu and enable **Запускать при входе**. If
-macOS requires approval, Doma opens the Login Items settings page.
+## Get started
 
-Doma is ad-hoc signed but not notarized. macOS may warn on the first launch; use right click → **Open** to confirm
-that you want to run it.
+1. Make sure you can already connect through an alias in `~/.ssh/config` — for example, `ssh devbox`.
+2. [Download the latest release](https://github.com/MrFlashAccount/Doma/releases/latest).
+3. Open the DMG and drag **Doma** to **Applications**.
+4. Launch Doma, choose the SSH host, and click any discovered service to open it locally.
 
-## Releases
+<p align="center">
+  <img src="docs/images/doma-installer.jpg" width="640" alt="Doma drag-to-Applications installer">
+</p>
 
-Releases are built by GitHub Actions on a macOS runner. Start the `Release` workflow manually and provide a semantic
-version such as `0.1.0`. The workflow builds and verifies an ad-hoc signed app, packages `Doma-<version>.dmg`, creates
-the matching `v<version>` tag, and publishes the DMG in a GitHub Release.
+### First launch
+
+Doma is ad-hoc signed but not notarized. macOS may block the first launch: Control-click **Doma** in Applications, choose **Open**, then confirm **Open** once more.
+
+To start Doma when you sign in, open its ellipsis menu and enable **Запускать при входе**. If macOS asks for approval, Doma takes you to the relevant Login Items settings.
+
+## Local means local
+
+Doma binds forwards only to `127.0.0.1`, never `0.0.0.0`. It reads the concrete hosts from your existing SSH config and maintains its own ControlMaster, so ordinary interactive SSH sessions stay independent.
+
+It watches listening TCP ports in the `1024–32767` range and keeps up to 128 active forwards. A port already occupied on your Mac is reported as a conflict and is never taken over.
