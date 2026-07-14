@@ -15,7 +15,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/doma-popover-hero.png" width="620" alt="Doma connected to an SSH host and forwarding its services">
+  <img src="docs/images/doma-popover-hero.png" width="400" alt="Doma connected to a demo SSH host and forwarding mock services">
 </p>
 
 ## The same port, locally
@@ -39,7 +39,7 @@ There is no new `ssh -L` command and no tunnel restart. When the service disappe
 
 ## Get started
 
-1. Make sure you can already connect through an alias in `~/.ssh/config` — for example, `ssh buddy`.
+1. Make sure you can already connect through an alias in `~/.ssh/config` — for example, `ssh devbox`.
 2. [Download the latest release](https://github.com/MrFlashAccount/Doma/releases/latest).
 3. Open the DMG and drag **Doma** to **Applications**.
 4. Launch Doma, choose the SSH host, and click any discovered service to open it locally.
