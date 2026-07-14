@@ -6,6 +6,8 @@
     <string>ru</string>
     <key>CFBundleExecutable</key>
     <string>Doma</string>
+    <key>CFBundleIconFile</key>
+    <string>Doma</string>
     <key>CFBundleIdentifier</key>
     <string>com.sergeigarin.Doma</string>
     <key>CFBundleInfoDictionaryVersion</key>
