@@ -216,15 +216,17 @@ struct ContentView: View {
                 Divider()
 
                 Button {
-                    updates.checkForUpdates()
+                    updates.performPrimaryAction()
                 } label: {
                     if let version = updates.availableVersion {
-                        Label("Обновить до \(version)…", systemImage: "arrow.down.circle.fill")
+                        Label("Обновить \(version)…", systemImage: "arrow.down.circle.fill")
+                    } else if updates.isCheckingForUpdates {
+                        Label("Проверяем обновления…", systemImage: "arrow.triangle.2.circlepath")
                     } else {
                         Label("Проверить обновления…", systemImage: "arrow.down.circle")
                     }
                 }
-                .disabled(!updates.canCheckForUpdates)
+                .disabled(!updates.canCheckForUpdates || updates.isCheckingForUpdates)
 
                 Divider()
 

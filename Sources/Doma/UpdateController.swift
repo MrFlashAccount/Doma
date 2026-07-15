@@ -6,6 +6,7 @@ import Sparkle
 final class UpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
     @Published private(set) var canCheckForUpdates = false
     @Published private(set) var availableVersion: String?
+    @Published private(set) var isCheckingForUpdates = false
 
     private var updaterController: SPUStandardUpdaterController?
     private var lastProbeAt: Date?
@@ -23,19 +24,24 @@ final class UpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
             .assign(to: &$canCheckForUpdates)
     }
 
-    func checkForUpdates() {
-        updaterController?.checkForUpdates(nil)
+    func performPrimaryAction() {
+        if availableVersion != nil {
+            updaterController?.checkForUpdates(nil)
+        } else {
+            checkForUpdatesIfNeeded(force: true)
+        }
     }
 
-    func checkForUpdatesIfNeeded(now: Date = Date()) {
+    func checkForUpdatesIfNeeded(now: Date = Date(), force: Bool = false) {
         guard let updater = updaterController?.updater,
               canCheckForUpdates,
               !updater.sessionInProgress,
-              lastProbeAt.map({ now.timeIntervalSince($0) >= 60 * 60 }) ?? true else {
+              force || (lastProbeAt.map({ now.timeIntervalSince($0) >= 60 * 60 }) ?? true) else {
             return
         }
 
         lastProbeAt = now
+        isCheckingForUpdates = true
         updater.checkForUpdateInformation()
     }
 
@@ -45,5 +51,13 @@ final class UpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         availableVersion = nil
+    }
+
+    func updater(
+        _ updater: SPUUpdater,
+        didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
+        error: Error?
+    ) {
+        isCheckingForUpdates = false
     }
 }
