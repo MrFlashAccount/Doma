@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var manager: TunnelManager
+    @ObservedObject var updates: UpdateController
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
     @State private var query = ""
@@ -210,6 +211,15 @@ struct ContentView: View {
                         Label("Разрешить автозапуск…", systemImage: "gear")
                     }
                 }
+
+                Divider()
+
+                Button {
+                    updates.checkForUpdates()
+                } label: {
+                    Label("Проверить обновления…", systemImage: "arrow.down.circle")
+                }
+                .disabled(!updates.canCheckForUpdates)
 
                 Divider()
 

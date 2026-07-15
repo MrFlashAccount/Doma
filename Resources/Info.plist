@@ -28,5 +28,19 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUFeedURL</key>
+    <string>https://github.com/MrFlashAccount/Doma/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>G/SR+mQyEWAM8dKx6kYPKCUV3J9sN2qM1cIdHcGavBg=</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>

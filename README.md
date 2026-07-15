@@ -35,6 +35,7 @@ There is no new `ssh -L` command and no tunnel restart. When the service disappe
 - **Open a service with one click.** Select any forwarded service to open its local URL in your browser.
 - **Notice problems immediately.** Local port conflicts are shown separately instead of failing silently.
 - **Recover automatically.** Doma reconnects on its own and also gives you explicit reconnect and sync actions.
+- **Update in place.** Run a manual update check from the ellipsis menu; Doma verifies, installs, and relaunches available releases.
 - **Start with your Mac.** Enable launch at login and leave Doma in the menu bar.
 
 ## Get started
@@ -59,3 +60,5 @@ To start Doma when you sign in, open its ellipsis menu and enable **Запуск
 Doma binds forwards only to `127.0.0.1`, never `0.0.0.0`. It reads the concrete hosts from your existing SSH config and maintains its own ControlMaster, so ordinary interactive SSH sessions stay independent.
 
 It watches listening TCP ports in the `1024–32767` range and keeps up to 128 active forwards. A port already occupied on your Mac is reported as a conflict and is never taken over.
+
+Updates are delivered through the official GitHub release feed and must pass Sparkle EdDSA verification before extraction.
