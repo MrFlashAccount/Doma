@@ -37,6 +37,37 @@ final class LocalProcessControllerTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(listeners[5000]?.ownersByPID[999]).canTerminate)
     }
 
+    func testManagedDomaMasterCanBeTerminatedAsConflictOwner() throws {
+        let listeners = LocalProcessController.parseListeners(
+            """
+            p456
+            cssh
+            u501
+            n127.0.0.1:3000
+            """,
+            currentUserID: 501,
+            currentProcessID: 999,
+            managedDomaMasterPIDs: [456]
+        )
+
+        let owner = try XCTUnwrap(listeners[3000]?.ownersByPID[456])
+        XCTAssertEqual(owner.name, "Doma tunnel")
+        XCTAssertTrue(owner.canTerminate)
+    }
+
+    func testParseManagedDomaMastersRequiresExactCommandShapeAndCacheDirectory() {
+        let output = """
+        123 /usr/bin/ssh -fMN -S /Users/test/Library/Caches/Doma/cm/abc -o ControlMaster=yes -o ControlPersist=yes buddy
+        456 /usr/bin/ssh -MN buddy
+        789 /usr/bin/ssh -fMN -S /tmp/not-doma -o ControlMaster=yes buddy
+        """
+
+        XCTAssertEqual(
+            DomaSSHMasterRegistry.parse(output, controlDirectory: "/Users/test/Library/Caches/Doma/cm"),
+            [DomaSSHMaster(pid: 123, socketPath: "/Users/test/Library/Caches/Doma/cm/abc")]
+        )
+    }
+
     func testTerminateStopsOwnedTemporaryListener() throws {
         let python = URL(fileURLWithPath: "/usr/bin/python3")
         guard FileManager.default.isExecutableFile(atPath: python.path) else {

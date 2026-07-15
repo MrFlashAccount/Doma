@@ -36,7 +36,10 @@ enum LocalProcessController {
             timeout: 5
         )
         guard result.status == 0 else { return [:] }
-        return parseListeners(result.stdout)
+        return parseListeners(
+            result.stdout,
+            managedDomaMasterPIDs: DomaSSHMasterRegistry.managedPIDs()
+        )
     }
 
     static func terminate(_ requestedOwners: [LocalPortOwner], on port: Int) -> String? {
@@ -46,7 +49,10 @@ enum LocalProcessController {
 
         let currentOwners = listeners()[port]?.ownersByPID ?? [:]
         for requested in requestedOwners {
-            guard let current = currentOwners[requested.pid], current.userID == requested.userID else {
+            guard let current = currentOwners[requested.pid],
+                  current.userID == requested.userID,
+                  current.name == requested.name
+            else {
                 return "Процесс \(requested.pid) больше не занимает порт \(port)"
             }
             if let reason = current.terminationBlockReason {
@@ -77,7 +83,8 @@ enum LocalProcessController {
     static func parseListeners(
         _ output: String,
         currentUserID: UInt32 = getuid(),
-        currentProcessID: Int32 = getpid()
+        currentProcessID: Int32 = getpid(),
+        managedDomaMasterPIDs: Set<Int32> = []
     ) -> [Int: LocalListenerInfo] {
         var currentPID: Int32?
         var commands: [Int32: String] = [:]
@@ -110,7 +117,8 @@ enum LocalProcessController {
             var info = LocalListenerInfo()
             info.endpointsByPID = endpointsByPID
             for pid in endpointsByPID.keys {
-                let name = commands[pid] ?? "PID \(pid)"
+                let isDomaTunnel = managedDomaMasterPIDs.contains(pid)
+                let name = isDomaTunnel ? "Doma tunnel" : (commands[pid] ?? "PID \(pid)")
                 let userID = userIDs[pid] ?? UInt32.max
                 info.ownersByPID[pid] = LocalPortOwner(
                     pid: pid,
@@ -121,7 +129,8 @@ enum LocalProcessController {
                         name: name,
                         userID: userID,
                         currentUserID: currentUserID,
-                        currentProcessID: currentProcessID
+                        currentProcessID: currentProcessID,
+                        isDomaTunnel: isDomaTunnel
                     )
                 )
             }
@@ -141,13 +150,17 @@ enum LocalProcessController {
         name: String,
         userID: UInt32,
         currentUserID: UInt32,
-        currentProcessID: Int32
+        currentProcessID: Int32,
+        isDomaTunnel: Bool
     ) -> String? {
         if userID != currentUserID {
             return "процесс принадлежит другому пользователю"
         }
         if pid == currentProcessID {
             return "это процесс Doma"
+        }
+        if isDomaTunnel {
+            return nil
         }
         if protectedProcessNames.contains(name.lowercased()) {
             return "это системный или инфраструктурный процесс"
