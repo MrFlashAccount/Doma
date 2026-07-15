@@ -13,11 +13,16 @@ final class TunnelManager: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var lastSync: Date?
     @Published private(set) var isSyncing = false
+    @Published private(set) var resolvingPorts = Set<Int>()
+    @Published private(set) var conflictResolutionError: String?
 
     private var masterPID: Int?
     private var activeForwards = Set<Int>()
     private var missingSince: [Int: Date] = [:]
     private var loopTask: Task<Void, Never>?
+    private var shutdownTask: Task<Void, Never>?
+    private var shutdownCompletions: [@MainActor () -> Void] = []
+    private var isShuttingDown = false
 
     init() {
         reloadHosts()
@@ -30,6 +35,7 @@ final class TunnelManager: ObservableObject {
 
     deinit {
         loopTask?.cancel()
+        shutdownTask?.cancel()
     }
 
     var groupedServices: [(String, [RemoteService])] {
@@ -83,6 +89,67 @@ final class TunnelManager: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
+    func shutdown(completion: @escaping @MainActor () -> Void) {
+        shutdownCompletions.append(completion)
+        guard shutdownTask == nil else { return }
+
+        isShuttingDown = true
+        loopTask?.cancel()
+        loopTask = nil
+        state = .disconnected
+
+        shutdownTask = Task { [weak self] in
+            guard let self else { return }
+
+            while isSyncing {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+
+            let host = selectedHost
+            let forwards = activeForwards
+            if !host.isEmpty {
+                await Task.detached {
+                    TunnelEngine.shutdown(host: host, activeForwards: forwards)
+                }.value
+            }
+
+            resetRuntime()
+            resolvingPorts = []
+            conflictResolutionError = nil
+            let completions = shutdownCompletions
+            shutdownCompletions = []
+            shutdownTask = nil
+            completions.forEach { $0() }
+        }
+    }
+
+    func resolveConflict(for service: RemoteService) {
+        guard service.hasConflict,
+              !service.conflictOwners.isEmpty,
+              service.conflictOwners.allSatisfy(\.canTerminate),
+              !resolvingPorts.contains(service.port),
+              !isShuttingDown
+        else { return }
+
+        let port = service.port
+        let owners = service.conflictOwners
+        resolvingPorts.insert(port)
+        conflictResolutionError = nil
+
+        Task {
+            let error = await Task.detached {
+                LocalProcessController.terminate(owners, on: port)
+            }.value
+            resolvingPorts.remove(port)
+            conflictResolutionError = error
+            await synchronize()
+        }
+    }
+
+    func clearConflictResolutionError() {
+        conflictResolutionError = nil
+    }
+
     private func startLoop() {
         loopTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -93,7 +160,7 @@ final class TunnelManager: ObservableObject {
     }
 
     private func synchronize() async {
-        guard !isSyncing, !selectedHost.isEmpty else { return }
+        guard !isSyncing, !selectedHost.isEmpty, !isShuttingDown else { return }
         isSyncing = true
         if masterPID == nil {
             state = .connecting

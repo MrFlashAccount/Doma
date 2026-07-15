@@ -2,15 +2,9 @@ import Foundation
 
 enum TunnelEngine {
     private static let ssh = "/usr/bin/ssh"
-    private static let lsof = "/usr/sbin/lsof"
     private static let bindAddress = "127.0.0.1"
     private static let forwardLimit = 128
     private static let disappearGrace: TimeInterval = 10
-
-    private struct ListenerInfo {
-        var pids: Set<Int> = []
-        var namesByPID: [Int: Set<String>] = [:]
-    }
 
     private struct RawListener {
         let port: Int
@@ -37,13 +31,30 @@ enum TunnelEngine {
     }
 
     static func stopMaster(host: String) {
+        shutdown(host: host, activeForwards: [])
+    }
+
+    static func shutdown(host: String, activeForwards: Set<Int>) {
         let socket = socketPath(for: host)
-        _ = CommandRunner.run(
-            ssh,
-            arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "exit", host],
-            timeout: 5
-        )
-        try? FileManager.default.removeItem(atPath: socket)
+        for port in activeForwards.sorted() {
+            _ = control(host: host, socket: socket, operation: "cancel", port: port)
+        }
+
+        for _ in 0..<3 {
+            _ = CommandRunner.run(
+                ssh,
+                arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "exit", host],
+                timeout: 5
+            )
+
+            for _ in 0..<10 {
+                if checkMaster(host: host, socket: socket) == nil {
+                    cleanupSocket(socket)
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
     }
 
     static func cycle(_ input: CycleInput) -> CycleResult {
@@ -78,7 +89,7 @@ enum TunnelEngine {
 
         let inventory = parseInventory(inventoryResult.stdout)
         let remotePorts = Set(inventory.listeners.map(\.port).filter { 1024...32767 ~= $0 })
-        let local = localListeners()
+        let local = LocalProcessController.listeners()
 
         var active = input.previousMasterPID == masterPID ? input.activeForwards : []
         var conflicts = Set<Int>()
@@ -131,7 +142,8 @@ enum TunnelEngine {
             inventory: inventory,
             remotePorts: remotePorts,
             active: active,
-            conflicts: conflicts
+            conflicts: conflicts,
+            localListeners: local
         )
 
         return CycleResult(
@@ -252,34 +264,9 @@ enum TunnelEngine {
         )
     }
 
-    private static func localListeners() -> [Int: ListenerInfo] {
-        let result = CommandRunner.run(
-            lsof,
-            arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpfn"],
-            timeout: 5
-        )
-        guard result.status == 0 else { return [:] }
-
-        var currentPID: Int?
-        var listeners: [Int: ListenerInfo] = [:]
-        for line in result.stdout.split(whereSeparator: \.isNewline).map(String.init) {
-            if line.hasPrefix("p") {
-                currentPID = Int(line.dropFirst())
-            } else if line.hasPrefix("n"),
-                      let pid = currentPID,
-                      let port = firstCapture(in: line, pattern: #":(\d+)$"#).flatMap(Int.init) {
-                var info = listeners[port] ?? ListenerInfo()
-                info.pids.insert(pid)
-                info.namesByPID[pid, default: []].insert(String(line.dropFirst()))
-                listeners[port] = info
-            }
-        }
-        return listeners
-    }
-
-    private static func ownsForward(port: Int, masterPID: Int, listeners: [Int: ListenerInfo]) -> Bool {
-        guard let info = listeners[port], info.pids.contains(masterPID) else { return false }
-        return info.namesByPID[masterPID, default: []].contains {
+    private static func ownsForward(port: Int, masterPID: Int, listeners: [Int: LocalListenerInfo]) -> Bool {
+        guard let info = listeners[port], info.ownersByPID[Int32(masterPID)] != nil else { return false }
+        return info.endpointsByPID[Int32(masterPID), default: []].contains {
             $0 == "\(bindAddress):\(port)" || $0.hasSuffix("\(bindAddress):\(port)")
         }
     }
@@ -341,7 +328,8 @@ enum TunnelEngine {
         inventory: Inventory,
         remotePorts: Set<Int>,
         active: Set<Int>,
-        conflicts: Set<Int>
+        conflicts: Set<Int>,
+        localListeners: [Int: LocalListenerInfo]
     ) -> [RemoteService] {
         let listenerByPort = Dictionary(inventory.listeners.map { ($0.port, $0) }, uniquingKeysWith: { first, _ in first })
 
@@ -390,7 +378,8 @@ enum TunnelEngine {
                 kind: kind,
                 details: details,
                 isForwarded: active.contains(port),
-                hasConflict: conflicts.contains(port)
+                hasConflict: conflicts.contains(port),
+                conflictOwners: conflicts.contains(port) ? (localListeners[port]?.owners ?? []) : []
             )
         }
     }
