@@ -24,6 +24,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DomaTests",
+            dependencies: ["Doma"],
             path: "Tests/DomaTests"
         ),
     ]

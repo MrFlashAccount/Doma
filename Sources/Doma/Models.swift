@@ -67,8 +67,19 @@ struct RemoteService: Identifiable, Hashable, Sendable {
     let details: String
     let isForwarded: Bool
     let hasConflict: Bool
+    let conflictOwners: [LocalPortOwner]
 
     var id: Int { port }
+}
+
+struct LocalPortOwner: Identifiable, Hashable, Sendable {
+    let pid: Int32
+    let name: String
+    let userID: UInt32
+    let terminationBlockReason: String?
+
+    var id: Int32 { pid }
+    var canTerminate: Bool { terminationBlockReason == nil }
 }
 
 struct CycleInput: Sendable {

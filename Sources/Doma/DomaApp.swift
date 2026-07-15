@@ -4,6 +4,7 @@ import SwiftUI
 @main
 @MainActor
 struct DomaApp: App {
+    @NSApplicationDelegateAdaptor(DomaAppDelegate.self) private var appDelegate
     @StateObject private var manager: TunnelManager
     @StateObject private var updates: UpdateController
 
@@ -50,6 +51,8 @@ struct DomaApp: App {
             previewWindow = nil
         }
         #endif
+
+        appDelegate.manager = manager
     }
 
     var body: some Scene {

@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var query = ""
     @State private var hoveredPort: Int?
     @State private var collapsedGroups = Set<String>()
+    @State private var conflictResolutionRequest: RemoteService?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,6 +33,26 @@ struct ContentView: View {
             }
         } message: {
             Text(launchAtLogin.errorMessage ?? "Неизвестная ошибка")
+        }
+        .alert(item: $conflictResolutionRequest) { service in
+            Alert(
+                title: Text("Освободить порт \(service.port)?"),
+                message: Text(conflictConfirmation(service)),
+                primaryButton: .destructive(Text("Завершить процесс")) {
+                    manager.resolveConflict(for: service)
+                },
+                secondaryButton: .cancel()
+            )
+        }
+        .alert(
+            "Не удалось освободить порт",
+            isPresented: conflictResolutionErrorBinding
+        ) {
+            Button("OK", role: .cancel) {
+                manager.clearConflictResolutionError()
+            }
+        } message: {
+            Text(manager.conflictResolutionError ?? "Неизвестная ошибка")
         }
     }
 
@@ -306,54 +327,85 @@ struct ContentView: View {
     }
 
     private func serviceRow(_ service: RemoteService) -> some View {
-        Button {
-            manager.openService(service)
-        } label: {
-            HStack(spacing: 9) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(kindColor(service.kind).opacity(0.11))
-                    Image(systemName: service.kind.symbol)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(kindColor(service.kind))
+        HStack(spacing: 2) {
+            Button {
+                manager.openService(service)
+            } label: {
+                HStack(spacing: 9) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(kindColor(service.kind).opacity(0.11))
+                        Image(systemName: service.kind.symbol)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(kindColor(service.kind))
+                    }
+                    .frame(width: 26, height: 26)
+
+                    Text(service.name)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 10)
+
+                    Text(String(service.port))
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.primary)
+
+                    if hoveredPort == service.port && service.isForwarded {
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 12)
+                    } else {
+                        statusMark(service)
+                    }
                 }
-                .frame(width: 26, height: 26)
-
-                Text(service.name)
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
-                Spacer(minLength: 10)
-
-                Text(String(service.port))
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.primary)
-
-                if hoveredPort == service.port && service.isForwarded {
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12)
-                } else {
-                    statusMark(service)
-                }
+                .padding(.leading, 7)
+                .padding(.trailing, service.hasConflict ? 2 : 7)
+                .frame(height: 38)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 7)
-            .frame(height: 38)
-            .contentShape(Rectangle())
-            .background {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(hoveredPort == service.port ? Color.primary.opacity(0.06) : .clear)
+            .buttonStyle(.plain)
+            .disabled(!service.isForwarded)
+            .help(serviceHelp(service))
+            .accessibilityLabel("\(service.name), порт \(service.port), \(serviceState(service))")
+
+            if service.hasConflict {
+                conflictResolutionButton(service)
             }
         }
-        .buttonStyle(.plain)
-        .disabled(!service.isForwarded)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(hoveredPort == service.port ? Color.primary.opacity(0.06) : .clear)
+        }
         .onHover { isHovering in
             hoveredPort = isHovering ? service.port : nil
         }
-        .help(serviceHelp(service))
-        .accessibilityLabel("\(service.name), порт \(service.port), \(serviceState(service))")
+    }
+
+    @ViewBuilder
+    private func conflictResolutionButton(_ service: RemoteService) -> some View {
+        if manager.resolvingPorts.contains(service.port) {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 32, height: 32)
+                .help("Завершаем локальный процесс")
+        } else {
+            Button {
+                conflictResolutionRequest = service
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(canResolveConflict(service) ? Color.orange : Color.secondary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canResolveConflict(service))
+            .help(conflictResolutionHelp(service))
+            .accessibilityLabel("Освободить порт \(service.port)")
+        }
     }
 
     @ViewBuilder
@@ -432,6 +484,17 @@ struct ContentView: View {
         )
     }
 
+    private var conflictResolutionErrorBinding: Binding<Bool> {
+        Binding(
+            get: { manager.conflictResolutionError != nil },
+            set: { isPresented in
+                if !isPresented {
+                    manager.clearConflictResolutionError()
+                }
+            }
+        )
+    }
+
     private func isGroupExpanded(_ group: String) -> Bool {
         !collapsedGroups.contains(group) || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -493,6 +556,32 @@ struct ContentView: View {
             ? "Открыть http://127.0.0.1:\(service.port)/"
             : "Порт не проброшен"
         return service.details.isEmpty ? action : "\(service.details)\n\(action)"
+    }
+
+    private func canResolveConflict(_ service: RemoteService) -> Bool {
+        !service.conflictOwners.isEmpty && service.conflictOwners.allSatisfy(\.canTerminate)
+    }
+
+    private func conflictResolutionHelp(_ service: RemoteService) -> String {
+        guard !service.conflictOwners.isEmpty else {
+            return "Не удалось определить локальный процесс"
+        }
+        if let blocked = service.conflictOwners.first(where: { !$0.canTerminate }) {
+            return "Нельзя завершить \(blocked.name) (PID \(blocked.pid)): "
+                + (blocked.terminationBlockReason ?? "операция недоступна")
+        }
+        return "Завершить \(conflictOwnerNames(service)) и освободить порт \(service.port)"
+    }
+
+    private func conflictConfirmation(_ service: RemoteService) -> String {
+        "Doma отправит SIGTERM процессу \(conflictOwnerNames(service)). "
+            + "Несохранённые данные этого приложения могут быть потеряны."
+    }
+
+    private func conflictOwnerNames(_ service: RemoteService) -> String {
+        service.conflictOwners
+            .map { "\($0.name) (PID \($0.pid))" }
+            .joined(separator: ", ")
     }
 
     private func serviceState(_ service: RemoteService) -> String {
