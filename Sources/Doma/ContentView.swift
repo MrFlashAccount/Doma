@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var manager: TunnelManager
+    @ObservedObject var updates: UpdateController
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
     @State private var query = ""
@@ -20,6 +21,7 @@ struct ContentView: View {
         .background(.regularMaterial)
         .onAppear {
             launchAtLogin.refresh()
+            updates.checkForUpdatesIfNeeded()
         }
         .alert(
             "Не удалось изменить автозапуск",
@@ -213,13 +215,37 @@ struct ContentView: View {
 
                 Divider()
 
+                Button {
+                    updates.performPrimaryAction()
+                } label: {
+                    if let version = updates.availableVersion {
+                        Label("Обновить \(version)…", systemImage: "arrow.down.circle.fill")
+                    } else if updates.isCheckingForUpdates {
+                        Label("Проверяем обновления…", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Label("Проверить обновления…", systemImage: "arrow.down.circle")
+                    }
+                }
+                .disabled(!updates.canCheckForUpdates || updates.isCheckingForUpdates)
+
+                Divider()
+
                 Button("Выйти из Doma", role: .destructive) {
                     manager.quit()
                 }
             } label: {
-                Image(systemName: "ellipsis")
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "ellipsis")
+
+                    if updates.availableVersion != nil {
+                        Circle()
+                            .fill(.orange)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 1, y: -1)
+                    }
+                }
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
