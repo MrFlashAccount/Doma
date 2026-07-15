@@ -25,7 +25,8 @@ detach_temp_dmg
 rm -rf "$DIST_DIR"
 mkdir -p "$STAGE_DIR/.background"
 
-APP_DIR="$(DOMA_VERSION="$VERSION" DOMA_BUILD_NUMBER="$BUILD_NUMBER" "$ROOT/scripts/build-app.sh" | tail -n 1)"
+DOMA_VERSION="$VERSION" DOMA_BUILD_NUMBER="$BUILD_NUMBER" "$ROOT/scripts/build-app.sh"
+APP_DIR="$ROOT/.build/release/Doma.app"
 STAGED_APP_DIR="$STAGE_DIR/Doma.app"
 
 /usr/bin/ditto "$APP_DIR" "$STAGED_APP_DIR"
