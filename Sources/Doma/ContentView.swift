@@ -21,7 +21,7 @@ struct ContentView: View {
         .frame(width: 400, height: 560)
         .onAppear {
             launchAtLogin.refresh()
-            updates.checkForUpdatesIfNeeded()
+            updates.checkForUpdatesSilentlyIfNeeded()
         }
         .alert(
             "Не удалось изменить автозапуск",
