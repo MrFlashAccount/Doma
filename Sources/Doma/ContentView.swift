@@ -21,6 +21,7 @@ struct ContentView: View {
         .background(.regularMaterial)
         .onAppear {
             launchAtLogin.refresh()
+            updates.checkForUpdatesIfNeeded()
         }
         .alert(
             "Не удалось изменить автозапуск",
@@ -217,7 +218,11 @@ struct ContentView: View {
                 Button {
                     updates.checkForUpdates()
                 } label: {
-                    Label("Проверить обновления…", systemImage: "arrow.down.circle")
+                    if let version = updates.availableVersion {
+                        Label("Обновить до \(version)…", systemImage: "arrow.down.circle.fill")
+                    } else {
+                        Label("Проверить обновления…", systemImage: "arrow.down.circle")
+                    }
                 }
                 .disabled(!updates.canCheckForUpdates)
 
@@ -227,9 +232,18 @@ struct ContentView: View {
                     manager.quit()
                 }
             } label: {
-                Image(systemName: "ellipsis")
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "ellipsis")
+
+                    if updates.availableVersion != nil {
+                        Circle()
+                            .fill(.orange)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 1, y: -1)
+                    }
+                }
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
