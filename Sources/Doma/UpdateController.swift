@@ -25,18 +25,14 @@ final class UpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func performPrimaryAction() {
-        if availableVersion != nil {
-            updaterController?.checkForUpdates(nil)
-        } else {
-            checkForUpdatesIfNeeded(force: true)
-        }
+        updaterController?.checkForUpdates(nil)
     }
 
-    func checkForUpdatesIfNeeded(now: Date = Date(), force: Bool = false) {
+    func checkForUpdatesSilentlyIfNeeded(now: Date = Date()) {
         guard let updater = updaterController?.updater,
               canCheckForUpdates,
               !updater.sessionInProgress,
-              force || (lastProbeAt.map({ now.timeIntervalSince($0) >= 60 * 60 }) ?? true) else {
+              lastProbeAt.map({ now.timeIntervalSince($0) >= 60 * 60 }) ?? true else {
             return
         }
 
