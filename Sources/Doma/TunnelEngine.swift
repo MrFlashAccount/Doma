@@ -46,9 +46,11 @@ enum TunnelEngine {
                 arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "exit", host],
                 timeout: 5
             )
+            DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil)
 
             for _ in 0..<10 {
-                if checkMaster(host: host, socket: socket) == nil {
+                let hasManagedMaster = DomaSSHMasterRegistry.masters().contains { $0.socketPath == socket }
+                if checkMaster(host: host, socket: socket) == nil, !hasManagedMaster {
                     cleanupSocket(socket)
                     return
                 }
@@ -166,9 +168,13 @@ enum TunnelEngine {
 
     private static func ensureMaster(host: String, socket: String) -> Int? {
         if let pid = checkMaster(host: host, socket: socket) {
+            DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
             return pid
         }
 
+        guard DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil) else {
+            return nil
+        }
         cleanupSocket(socket)
         let result = CommandRunner.run(
             ssh,
@@ -189,6 +195,7 @@ enum TunnelEngine {
 
         for _ in 0..<20 {
             if let pid = checkMaster(host: host, socket: socket) {
+                DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
                 return pid
             }
             Thread.sleep(forTimeInterval: 0.25)

@@ -19,7 +19,6 @@ struct ContentView: View {
             footer
         }
         .frame(width: 400, height: 560)
-        .background(.regularMaterial)
         .onAppear {
             launchAtLogin.refresh()
             updates.checkForUpdatesIfNeeded()
@@ -118,17 +117,11 @@ struct ContentView: View {
                 Label("Обновить список", systemImage: "arrow.clockwise")
             }
         } label: {
-            HStack(spacing: 5) {
-                Text(manager.selectedHost.isEmpty ? "SSH сервер" : manager.selectedHost)
-                    .font(.system(size: 16, weight: .semibold))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .contentShape(Rectangle())
+            Text(manager.selectedHost.isEmpty ? "SSH сервер" : manager.selectedHost)
+                .font(.system(size: 14, weight: .semibold))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .controlSize(.small)
+        .domaGlassButtonStyle()
         .fixedSize()
         .accessibilityLabel("SSH сервер: \(manager.selectedHost)")
     }
@@ -268,8 +261,9 @@ struct ContentView: View {
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+            .controlSize(.small)
+            .buttonBorderShape(.circle)
+            .domaGlassButtonStyle()
             .fixedSize()
             .accessibilityLabel("Дополнительные действия")
         }
@@ -327,7 +321,7 @@ struct ContentView: View {
     }
 
     private func serviceRow(_ service: RemoteService) -> some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 8) {
             Button {
                 manager.openService(service)
             } label: {
@@ -351,30 +345,28 @@ struct ContentView: View {
                     Text(String(service.port))
                         .font(.system(size: 13, weight: .medium, design: .monospaced))
                         .foregroundStyle(.primary)
-
-                    if hoveredPort == service.port && service.isForwarded {
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 12)
-                    } else {
-                        statusMark(service)
-                    }
                 }
-                .padding(.leading, 7)
-                .padding(.trailing, service.hasConflict ? 2 : 7)
-                .frame(height: 38)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
             .disabled(!service.isForwarded)
             .help(serviceHelp(service))
             .accessibilityLabel("\(service.name), порт \(service.port), \(serviceState(service))")
 
-            if service.hasConflict {
+            if hoveredPort == service.port && service.isForwarded {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12)
+            } else if service.hasConflict {
                 conflictResolutionButton(service)
+            } else {
+                statusMark(service)
             }
         }
+        .padding(.horizontal, 7)
+        .frame(height: 38)
         .background {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(hoveredPort == service.port ? Color.primary.opacity(0.06) : .clear)
@@ -389,22 +381,26 @@ struct ContentView: View {
         if manager.resolvingPorts.contains(service.port) {
             ProgressView()
                 .controlSize(.small)
-                .frame(width: 32, height: 32)
+                .frame(width: 12, height: 12)
                 .help("Завершаем локальный процесс")
-        } else {
+        } else if canResolveConflict(service) {
             Button {
                 conflictResolutionRequest = service
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(canResolveConflict(service) ? Color.orange : Color.secondary)
-                    .frame(width: 32, height: 32)
-                    .contentShape(Rectangle())
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.orange)
             }
-            .buttonStyle(.plain)
-            .disabled(!canResolveConflict(service))
+            .buttonStyle(.borderless)
+            .controlSize(.mini)
             .help(conflictResolutionHelp(service))
             .accessibilityLabel("Освободить порт \(service.port)")
+        } else {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+                .frame(width: 12)
+                .help(conflictResolutionHelp(service))
         }
     }
 
@@ -441,11 +437,10 @@ struct ContentView: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .medium))
-                .frame(width: 28, height: 28)
-                .background(Color.primary.opacity(0.055), in: Circle())
-                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .controlSize(.small)
+        .buttonBorderShape(.circle)
+        .domaGlassButtonStyle()
         .help(title)
         .accessibilityLabel(title)
     }
@@ -595,6 +590,17 @@ struct ContentView: View {
         case .connecting: .yellow
         case .failed: .red
         case .disconnected: .gray
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func domaGlassButtonStyle() -> some View {
+        if #available(macOS 26.0, *) {
+            buttonStyle(.glass)
+        } else {
+            buttonStyle(.bordered)
         }
     }
 }

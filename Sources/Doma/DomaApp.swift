@@ -13,9 +13,14 @@ struct DomaApp: App {
     #endif
 
     init() {
-        let manager = TunnelManager()
+        #if DEBUG
         let isPreview = CommandLine.arguments.contains("--preview-window")
             || CommandLine.arguments.contains("--preview-menubar-icon")
+            || ProcessInfo.processInfo.environment["DOMA_PREVIEW"] == "1"
+        #else
+        let isPreview = false
+        #endif
+        let manager = TunnelManager(preview: isPreview)
         let updates = UpdateController(startingUpdater: !isPreview)
         _manager = StateObject(wrappedValue: manager)
         _updates = StateObject(wrappedValue: updates)

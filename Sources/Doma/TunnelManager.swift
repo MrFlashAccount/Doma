@@ -24,7 +24,14 @@ final class TunnelManager: ObservableObject {
     private var shutdownCompletions: [@MainActor () -> Void] = []
     private var isShuttingDown = false
 
-    init() {
+    init(preview: Bool = false) {
+        #if DEBUG
+        if preview {
+            loadPreviewState()
+            return
+        }
+        #endif
+
         reloadHosts()
         let saved = UserDefaults.standard.string(forKey: "selectedHost")
         selectedHost = hosts.contains(where: { $0.alias == saved })
@@ -32,6 +39,78 @@ final class TunnelManager: ObservableObject {
             : (hosts.first(where: { $0.alias == "buddy" })?.alias ?? hosts.first?.alias ?? "")
         startLoop()
     }
+
+    #if DEBUG
+    private func loadPreviewState() {
+        let project = "studio"
+        hosts = [SSHHost(alias: project), SSHHost(alias: "staging")]
+        selectedHost = project
+        state = .connected
+        services = [
+            RemoteService(
+                port: 4174,
+                name: "Vite",
+                group: "~/Projects/atlas",
+                kind: .vite,
+                details: "vite --host 127.0.0.1",
+                isForwarded: true,
+                hasConflict: false,
+                conflictOwners: []
+            ),
+            RemoteService(
+                port: 8765,
+                name: "Python",
+                group: "~/Projects/atlas",
+                kind: .python,
+                details: "python3 -m http.server",
+                isForwarded: false,
+                hasConflict: true,
+                conflictOwners: [
+                    LocalPortOwner(
+                        pid: 4312,
+                        name: "python3",
+                        userID: getuid(),
+                        terminationBlockReason: nil
+                    ),
+                ]
+            ),
+            RemoteService(
+                port: 12000,
+                name: "root-front",
+                group: "atlas-compose",
+                kind: .docker,
+                details: "atlas-root-front",
+                isForwarded: true,
+                hasConflict: false,
+                conflictOwners: []
+            ),
+            RemoteService(
+                port: 12010,
+                name: "document",
+                group: "atlas-compose",
+                kind: .docker,
+                details: "atlas-document",
+                isForwarded: true,
+                hasConflict: false,
+                conflictOwners: []
+            ),
+            RemoteService(
+                port: 12012,
+                name: "spreadsheet",
+                group: "atlas-compose",
+                kind: .docker,
+                details: "atlas-spreadsheet",
+                isForwarded: true,
+                hasConflict: false,
+                conflictOwners: []
+            ),
+        ]
+        activeCount = services.count(where: \.isForwarded)
+        conflictCount = services.count(where: \.hasConflict)
+        remoteCount = services.count
+        lastSync = Date()
+    }
+    #endif
 
     deinit {
         loopTask?.cancel()
