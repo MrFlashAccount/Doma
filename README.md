@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/images/doma-icon.png" width="128" alt="Doma app icon">
+  <img src="docs/images/doma-icon.png" width="256" alt="Doma app icon">
   <h1>Doma</h1>
   <p><strong>Your remote services, right at home.</strong></p>
   <p>
