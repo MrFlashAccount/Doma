@@ -83,6 +83,47 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertNotEqual(service.group, "Системные сервисы")
     }
 
+    func testUnknownSocketUIDRemainsUnknownAndCanInferUserProcess() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 128 127.0.0.1:4399 0.0.0.0:* ino:10
+        __DOCKER__
+        __PS__
+        201 1 501 demo bun /usr/local/bin/bun run dashboard --port 4399
+        __CWD__
+        """
+
+        let inventory = RemoteInventoryParser.parse(output)
+        let service = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: output).first
+        )
+
+        XCTAssertNil(try XCTUnwrap(inventory.listeners.first).userID)
+        XCTAssertEqual(service.kind, .node)
+        XCTAssertEqual(service.name, "Bun")
+    }
+
+    func testUnknownSocketOwnerWithoutProcessEvidenceStaysGeneric() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 128 127.0.0.1:4400 0.0.0.0:* ino:11
+        __DOCKER__
+        __PS__
+        __CWD__
+        """
+
+        let service = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: output).first
+        )
+
+        XCTAssertEqual(service.kind, .process)
+        XCTAssertNotEqual(service.group, "Системные сервисы")
+    }
+
     func testInventoryNeverAttemptsPrivilegeEscalation() {
         XCTAssertFalse(TunnelEngine.inventoryScript.contains("sudo"))
         XCTAssertTrue(TunnelEngine.inventoryScript.contains("ss -H -ltnpe"))

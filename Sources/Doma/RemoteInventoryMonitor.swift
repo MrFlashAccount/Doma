@@ -74,25 +74,37 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
       fi
     done
 
-    doma_listener_signature() {
-      rows=$(awk '$4 == "0A" {
+    doma_inventory_signature() {
+      listener_rows=$(awk '$4 == "0A" {
         split($2, local_address, ":")
         port = "x" toupper(local_address[2])
         if (port >= "x0400" && port <= "xFFFF") {
           # Inventory eligibility may depend on Docker metadata (for example,
           # Minikube high ports), so watch the full non-privileged range. A
-          # process restart on the same address and port is not a change.
+          # listener restart on the same address and port is not a change.
           print FILENAME, $2
         }
       }' "$@" 2>&1)
       status=$?
       if [ "$status" -ne 0 ]; then
-        case "$rows" in
-          *ermission\ denied*) printf '__DOMA_PERMISSION_DENIED__ %s\n' "$rows" >&2; return 77 ;;
-          *) printf '__DOMA_WATCHER_READ_FAILED__ %s\n' "$rows" >&2; return 75 ;;
+        case "$listener_rows" in
+          *ermission\ denied*) printf '__DOMA_PERMISSION_DENIED__ %s\n' "$listener_rows" >&2; return 77 ;;
+          *) printf '__DOMA_WATCHER_READ_FAILED__ %s\n' "$listener_rows" >&2; return 75 ;;
         esac
       fi
-      sorted=$(printf '%s\n' "$rows" | LC_ALL=C sort 2>&1)
+
+      # A public zrok share can start or stop without changing the target
+      # application's listening socket. Hash only zrok processes so labels
+      # refresh promptly without running the full inventory in this loop.
+      zrok_rows=''
+      if command -v ps >/dev/null 2>&1; then
+        zrok_rows=$(ps -C zrok -o pid=,args= 2>/dev/null)
+        if [ "$?" -ne 0 ]; then
+          zrok_rows=''
+        fi
+      fi
+
+      sorted=$(printf '%s\n%s\n' "$listener_rows" "$zrok_rows" | LC_ALL=C sort 2>&1)
       status=$?
       if [ "$status" -ne 0 ]; then
         printf '__DOMA_WATCHER_READ_FAILED__ %s\n' "$sorted" >&2
@@ -111,7 +123,7 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
     candidate=''
     candidate_count=0
     while :; do
-      current=$(doma_listener_signature "$@")
+      current=$(doma_inventory_signature "$@")
       status=$?
       if [ "$status" -ne 0 ]; then
         exit "$status"

@@ -41,7 +41,7 @@ struct RemoteServiceRecognitionContext {
         guard let currentUserID = inventory.currentUserID else { return false }
         if let process { return process.userID != currentUserID }
         if let userID = listener?.userID { return userID != currentUserID }
-        return true
+        return false
     }
 
     var standardDetails: String {

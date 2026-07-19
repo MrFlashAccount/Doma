@@ -41,7 +41,7 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertNotNil(result.protocolError)
     }
 
-    func testWatcherHotPathOnlyHashesListeningSocketRows() {
+    func testWatcherHotPathHashesListenersAndZrokProcessMetadata() {
         let script = RemoteInventoryMonitor.watcherScript
 
         XCTAssertTrue(script.contains("/proc/net/tcp"))
@@ -55,10 +55,49 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertFalse(script.contains("print FILENAME, $2, $10"))
         XCTAssertTrue(script.contains("cksum"))
         XCTAssertTrue(script.contains("sleep 1"))
+        XCTAssertTrue(script.contains("ps -C zrok -o pid=,args="))
         XCTAssertFalse(script.contains("ss -H"))
         XCTAssertFalse(script.contains("docker ps"))
         XCTAssertFalse(script.contains("ps -eo"))
         XCTAssertFalse(script.contains("/proc/[0-9]"))
+    }
+
+    func testWatcherDetectsZrokProcessChangesWithoutListenerChanges() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DomaWatcherZrokTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let tcp = directory.appendingPathComponent("tcp")
+        let missingTCP6 = directory.appendingPathComponent("tcp6")
+        try "header\n".write(to: tcp, atomically: true, encoding: .utf8)
+        let script = """
+        sample=0
+        ps() {
+          if [ "$sample" -ge 1 ]; then
+            printf '%s\\n' '321 zrok zrok share public http://127.0.0.1:8765'
+            return 0
+          fi
+          return 1
+        }
+        sleep() {
+          sample=$((sample + 1))
+          if [ "$sample" -ge 6 ]; then
+            exit 0
+          fi
+        }
+        \(RemoteInventoryMonitor.watcherScript
+            .replacingOccurrences(of: "/proc/net/tcp6", with: missingTCP6.path)
+            .replacingOccurrences(of: "/proc/net/tcp", with: tcp.path))
+        """
+
+        let result = CommandRunner.run("/bin/sh", arguments: ["-s"], stdin: script, timeout: 2)
+        let markers = result.stdout.split(separator: "\n").filter {
+            RemoteMonitorOutputParser.isChangeLine(String($0))
+        }
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(markers.count, 2, result.stdout)
     }
 
     func testWatcherReportsPermanentPermissionAndDependencyFailures() {

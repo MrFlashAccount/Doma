@@ -119,7 +119,7 @@ enum RemoteInventoryParser {
                             port: port,
                             pid: pid,
                             command: command,
-                            userID: userID ?? 0
+                            userID: userID
                         )
                     )
                 case .docker:
