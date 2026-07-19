@@ -48,7 +48,7 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertTrue(script.contains("/proc/net/tcp6"))
         XCTAssertTrue(script.contains(#"$4 == "0A""#))
         XCTAssertTrue(script.contains(#"port >= "x0400""#))
-        XCTAssertTrue(script.contains(#"port <= "x7FFF""#))
+        XCTAssertTrue(script.contains(#"port <= "xFFFF""#))
         XCTAssertTrue(script.contains("candidate_count"))
         XCTAssertTrue(script.contains(#"[ "$candidate_count" -ge 5 ]"#))
         XCTAssertTrue(script.contains("print FILENAME, $2"))

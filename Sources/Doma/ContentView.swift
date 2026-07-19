@@ -597,7 +597,7 @@ struct ContentView: View {
             return "Попробуй изменить запрос"
         }
         return manager.state == .connected
-            ? "На сервере нет TCP listeners в диапазоне 1024–32767"
+            ? "На сервере нет поддерживаемых TCP-сервисов"
             : "Выбери SSH сервер и подключись"
     }
 
@@ -621,9 +621,12 @@ struct ContentView: View {
     private func kindColor(_ kind: ServiceKind) -> Color {
         switch kind {
         case .docker: .blue
+        case .minikube: .indigo
         case .vite: .yellow
         case .node: .green
         case .python: .cyan
+        case .zrok: .purple
+        case .process: .mint
         case .system: .gray
         }
     }

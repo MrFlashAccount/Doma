@@ -78,9 +78,10 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
       rows=$(awk '$4 == "0A" {
         split($2, local_address, ":")
         port = "x" toupper(local_address[2])
-        if (port >= "x0400" && port <= "x7FFF") {
-          # Forwarding depends on the listening address and port, not the
-          # socket inode. A process restart on the same port is not a change.
+        if (port >= "x0400" && port <= "xFFFF") {
+          # Inventory eligibility may depend on Docker metadata (for example,
+          # Minikube high ports), so watch the full non-privileged range. A
+          # process restart on the same address and port is not a change.
           print FILENAME, $2
         }
       }' "$@" 2>&1)
