@@ -49,6 +49,10 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertTrue(script.contains(#"$4 == "0A""#))
         XCTAssertTrue(script.contains(#"port >= "x0400""#))
         XCTAssertTrue(script.contains(#"port <= "x7FFF""#))
+        XCTAssertTrue(script.contains("candidate_count"))
+        XCTAssertTrue(script.contains(#"[ "$candidate_count" -ge 5 ]"#))
+        XCTAssertTrue(script.contains("print FILENAME, $2"))
+        XCTAssertFalse(script.contains("print FILENAME, $2, $10"))
         XCTAssertTrue(script.contains("cksum"))
         XCTAssertTrue(script.contains("sleep 1"))
         XCTAssertFalse(script.contains("ss -H"))
@@ -65,6 +69,43 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertTrue(script.contains(RemoteAccessErrorFormatter.watcherReadMarker))
         XCTAssertTrue(script.contains("exit 77"))
         XCTAssertTrue(script.contains("exit 127"))
+    }
+
+    func testWatcherIgnoresTransientListenerFlaps() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DomaWatcherDebounceTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let tcp = directory.appendingPathComponent("tcp")
+        let missingTCP6 = directory.appendingPathComponent("tcp6")
+        try "header\n".write(to: tcp, atomically: true, encoding: .utf8)
+        let tcpPath = tcp.path.replacingOccurrences(of: "'", with: "'\\''")
+        let listener = "0: 0100007F:4AF6 00000000:0000 0A 00000000:00000000 "
+            + "00:00000000 00000000 1000 0 12345 1 0000000000000000 100 0 0 10 0"
+        let escapedListener = listener.replacingOccurrences(of: "'", with: "'\\''")
+        let script = """
+        step=0
+        sleep() {
+          step=$((step + 1))
+          case "$step" in
+            1|3) printf '%s\\n' '\(escapedListener)' > '\(tcpPath)' ;;
+            2|4) printf 'header\\n' > '\(tcpPath)' ;;
+            5) exit 0 ;;
+          esac
+        }
+        \(RemoteInventoryMonitor.watcherScript
+            .replacingOccurrences(of: "/proc/net/tcp6", with: missingTCP6.path)
+            .replacingOccurrences(of: "/proc/net/tcp", with: tcp.path))
+        """
+
+        let result = CommandRunner.run("/bin/sh", arguments: ["-s"], stdin: script, timeout: 2)
+        let markers = result.stdout.split(separator: "\n").filter {
+            RemoteMonitorOutputParser.isChangeLine(String($0))
+        }
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(markers.count, 1, result.stdout)
     }
 
     func testWatcherRejectsUnreadableTCP6InsteadOfMaskingIt() throws {

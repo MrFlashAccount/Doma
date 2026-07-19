@@ -79,7 +79,9 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
         split($2, local_address, ":")
         port = "x" toupper(local_address[2])
         if (port >= "x0400" && port <= "x7FFF") {
-          print FILENAME, $2, $10
+          # Forwarding depends on the listening address and port, not the
+          # socket inode. A process restart on the same port is not a change.
+          print FILENAME, $2
         }
       }' "$@" 2>&1)
       status=$?
@@ -105,15 +107,37 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
     }
 
     previous=''
+    candidate=''
+    candidate_count=0
     while :; do
       current=$(doma_listener_signature "$@")
       status=$?
       if [ "$status" -ne 0 ]; then
         exit "$status"
       fi
-      if [ "$current" != "$previous" ]; then
+      if [ -z "$previous" ]; then
         printf '__DOMA_INVENTORY_CHANGED__ %s\n' "$current"
         previous=$current
+        candidate=''
+        candidate_count=0
+      elif [ "$current" = "$previous" ]; then
+        candidate=''
+        candidate_count=0
+      else
+        if [ "$current" = "$candidate" ]; then
+          candidate_count=$((candidate_count + 1))
+        else
+          candidate=$current
+          candidate_count=1
+        fi
+        # Ignore short-lived listeners. A real start/stop is reported after
+        # the new port set remains unchanged for five consecutive samples.
+        if [ "$candidate_count" -ge 5 ]; then
+          printf '__DOMA_INVENTORY_CHANGED__ %s\n' "$current"
+          previous=$current
+          candidate=''
+          candidate_count=0
+        fi
       fi
       sleep 1
     done
