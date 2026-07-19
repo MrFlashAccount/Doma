@@ -680,7 +680,12 @@ enum TunnelEngine {
         if !inventory.sawProcessSection {
             inventory.warnings.insert(.protocolSections)
         }
-        if inventory.listeners.contains(where: { $0.pid == nil || $0.command == nil }) {
+        let hasAnySocketProcessMetadata = inventory.listeners.contains {
+            $0.pid != nil || $0.command != nil
+        }
+        if hasAnySocketProcessMetadata,
+           inventory.listeners.contains(where: { $0.pid == nil || $0.command == nil })
+        {
             inventory.warnings.insert(.partialSockets)
         }
         let listenerPIDs = Set(inventory.listeners.compactMap(\.pid))

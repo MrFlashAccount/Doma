@@ -226,6 +226,19 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertTrue(warning?.contains("продолжают работать") == true)
     }
 
+    func testUniformlyUnavailableSocketProcessMetadataIsNotANoisyWarning() {
+        let output = """
+        __SS__
+        LISTEN 0 128 127.0.0.1:4321 0.0.0.0:*
+        LISTEN 0 128 127.0.0.1:4322 0.0.0.0:*
+        __DOCKER__
+        __PS__
+        __CWD__
+        """
+
+        XCTAssertNil(TunnelEngine.inventoryWarning(in: output))
+    }
+
     func testMissingMandatorySocketSectionIsRejected() {
         let output = """
         __DOCKER__
