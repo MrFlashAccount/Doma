@@ -5,6 +5,7 @@ import Foundation
 final class TunnelManager: ObservableObject {
     private static let fullResyncInterval: TimeInterval = 300
     private static let conflictRetryInterval: TimeInterval = 15
+    private static let maxReconnectAttempts = 5
 
     @Published private(set) var hosts: [SSHHost] = []
     @Published private(set) var selectedHost = ""
@@ -27,16 +28,22 @@ final class TunnelManager: ObservableObject {
     private var monitor: RemoteInventoryMonitor?
     private var monitorHost: String?
     private var connectionTask: Task<Void, Never>?
+    private var recoveryTask: Task<Void, Never>?
+    private var hostCleanupTask: Task<Void, Never>?
+    private var hostCleanupGeneration: UUID?
     private var connectionGeneration: UUID?
     private var syncTask: Task<Void, Never>?
+    private var syncGeneration: UUID?
     private var resyncTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var disappearanceTask: Task<Void, Never>?
     private var conflictRetryTask: Task<Void, Never>?
+    private var degradedRetryTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
     private var shutdownCompletions: [@MainActor () -> Void] = []
     private var syncPending = false
     private var reconnectAttempt = 0
+    private var reconnectBudgetHost: String?
     private var isShuttingDown = false
 
     init(
@@ -80,6 +87,12 @@ final class TunnelManager: ObservableObject {
         selectedHost = hosts.contains(where: { $0.alias == saved })
             ? saved!
             : (hosts.first(where: { $0.alias == "buddy" })?.alias ?? hosts.first?.alias ?? "")
+        DomaStatusStore.standard.clear()
+        if let recoveryError = SSHKnownHostsManager.recoverInterruptedTransactions() {
+            state = .failed
+            lastError = recoveryError
+            return
+        }
         beginMonitoring()
     }
 
@@ -158,11 +171,14 @@ final class TunnelManager: ObservableObject {
     deinit {
         monitor?.stop()
         connectionTask?.cancel()
+        recoveryTask?.cancel()
         syncTask?.cancel()
+        syncGeneration = nil
         resyncTask?.cancel()
         reconnectTask?.cancel()
         disappearanceTask?.cancel()
         conflictRetryTask?.cancel()
+        degradedRetryTask?.cancel()
         shutdownTask?.cancel()
     }
 
@@ -177,31 +193,39 @@ final class TunnelManager: ObservableObject {
     }
 
     func selectHost(_ alias: String) {
-        guard alias != selectedHost else { return }
+        guard alias != selectedHost, recoveryTask == nil else { return }
         let previous = selectedHost
         stopMonitoring()
         selectedHost = alias
         UserDefaults.standard.set(alias, forKey: "selectedHost")
+        resetReconnectBudget(for: alias)
         resetRuntime()
 
-        Task.detached {
-            if !previous.isEmpty {
-                TunnelEngine.stopMaster(host: previous)
-            }
+        let generation = UUID()
+        connectionGeneration = generation
+        let cleanup = queueHostCleanup(previous)
+        connectionTask = Task { [weak self] in
+            await cleanup?.value
+            guard let self, connectionGeneration == generation else { return }
+            connectionTask = nil
+            connectionGeneration = nil
+            guard !Task.isCancelled, selectedHost == alias, !isShuttingDown else { return }
+            beginMonitoring()
         }
-        beginMonitoring()
     }
 
     func reconnect() {
-        guard !selectedHost.isEmpty else { return }
+        guard !selectedHost.isEmpty, recoveryTask == nil else { return }
         let host = selectedHost
+        resetReconnectBudget(for: host)
         stopMonitoring()
         state = .connecting
         resetRuntime(keepState: true)
         let generation = UUID()
         connectionGeneration = generation
+        let cleanup = queueHostCleanup(host)
         connectionTask = Task { [weak self] in
-            await Task.detached { TunnelEngine.stopMaster(host: host) }.value
+            await cleanup?.value
             guard let self, connectionGeneration == generation else { return }
             connectionTask = nil
             connectionGeneration = nil
@@ -235,23 +259,23 @@ final class TunnelManager: ObservableObject {
         shutdownCompletions.append(completion)
         guard shutdownTask == nil else { return }
 
+        let activeRecovery = recoveryTask
+        let activeSync = syncTask
+        let activeCleanup = hostCleanupTask
         isShuttingDown = true
         stopMonitoring()
         state = .disconnected
 
         shutdownTask = Task { [weak self] in
             guard let self else { return }
-
-            while isSyncing {
-                try? await Task.sleep(for: .milliseconds(50))
-            }
+            await activeRecovery?.value
+            await activeSync?.value
+            await activeCleanup?.value
 
             let host = selectedHost
             let forwards = activeForwards
             if !host.isEmpty {
-                await Task.detached {
-                    TunnelEngine.shutdown(host: host, activeForwards: forwards)
-                }.value
+                await TunnelEngine.shutdown(host: host, activeForwards: forwards)
             }
 
             resetRuntime()
@@ -292,25 +316,23 @@ final class TunnelManager: ObservableObject {
     }
 
     func removeStaleHostKeyAndReconnect() {
-        guard hostKeyChanged, !selectedHost.isEmpty, !isShuttingDown else { return }
+        guard hostKeyChanged,
+              !selectedHost.isEmpty,
+              !isShuttingDown,
+              recoveryTask == nil
+        else { return }
 
         let host = selectedHost
         stopMonitoring()
         state = .connecting
         lastError = nil
         hostKeyChanged = false
+        recoveryTask = Task { [weak self] in
+            let error = await SSHKnownHostsManager.removeStaleKeyAndRequireConfirmationAsync(host: host)
 
-        let generation = UUID()
-        connectionGeneration = generation
-        connectionTask = Task { [weak self] in
-            let error = await Task.detached {
-                SSHKnownHostsManager.removeStaleKey(host: host)
-            }.value
-
-            guard let self, connectionGeneration == generation else { return }
-            connectionTask = nil
-            connectionGeneration = nil
-            guard !Task.isCancelled, selectedHost == host, !isShuttingDown else { return }
+            guard let self else { return }
+            recoveryTask = nil
+            guard selectedHost == host, !isShuttingDown else { return }
 
             if let error {
                 state = .failed
@@ -325,7 +347,8 @@ final class TunnelManager: ObservableObject {
         guard !selectedHost.isEmpty,
               !isShuttingDown,
               monitor == nil,
-              connectionTask == nil
+              connectionTask == nil,
+              recoveryTask == nil
         else { return }
 
         let host = selectedHost
@@ -336,9 +359,7 @@ final class TunnelManager: ObservableObject {
         connectionGeneration = generation
 
         connectionTask = Task { [weak self] in
-            let preparation = await Task.detached {
-                TunnelEngine.prepareMaster(host: host)
-            }.value
+            let preparation = await TunnelEngine.prepareMaster(host: host)
 
             guard let self else { return }
             guard connectionGeneration == generation else { return }
@@ -351,6 +372,7 @@ final class TunnelManager: ObservableObject {
                 state = .failed
                 lastError = preparation.error ?? "Не удалось установить SSH-соединение"
                 hostKeyChanged = preparation.hostKeyChanged
+                DomaStatusStore.standard.clear()
                 if preparation.shouldRetryAutomatically {
                     scheduleReconnect(for: host)
                 }
@@ -383,6 +405,7 @@ final class TunnelManager: ObservableObject {
                 state = .failed
                 lastError = error.localizedDescription
                 hostKeyChanged = false
+                DomaStatusStore.standard.clear()
                 scheduleReconnect(for: host)
             }
         }
@@ -403,18 +426,24 @@ final class TunnelManager: ObservableObject {
         disappearanceTask = nil
         conflictRetryTask?.cancel()
         conflictRetryTask = nil
+        degradedRetryTask?.cancel()
+        degradedRetryTask = nil
         syncTask?.cancel()
+        syncTask = nil
+        syncGeneration = nil
         syncPending = false
         state = .failed
         lastError = termination.message ?? "Соединение с удалённым монитором закрыто"
         lastWarning = nil
         hostKeyChanged = false
+        DomaStatusStore.standard.clear()
         if termination.shouldRetryAutomatically {
             scheduleReconnect(for: host)
         }
     }
 
     private func stopMonitoring() {
+        DomaStatusStore.standard.clear()
         monitor?.stop()
         monitor = nil
         monitorHost = nil
@@ -422,6 +451,8 @@ final class TunnelManager: ObservableObject {
         connectionTask = nil
         connectionGeneration = nil
         syncTask?.cancel()
+        syncTask = nil
+        syncGeneration = nil
         resyncTask?.cancel()
         resyncTask = nil
         reconnectTask?.cancel()
@@ -430,11 +461,23 @@ final class TunnelManager: ObservableObject {
         disappearanceTask = nil
         conflictRetryTask?.cancel()
         conflictRetryTask = nil
+        degradedRetryTask?.cancel()
+        degradedRetryTask = nil
         syncPending = false
     }
 
     private func scheduleReconnect(for host: String) {
         guard selectedHost == host, !isShuttingDown, reconnectTask == nil else { return }
+        if reconnectBudgetHost != host {
+            reconnectBudgetHost = host
+            reconnectAttempt = 0
+        }
+        guard reconnectAttempt < Self.maxReconnectAttempts else {
+            if let lastError, !lastError.contains("Повтори подключение вручную") {
+                self.lastError = lastError + "\n\nАвтоматические попытки остановлены. Проверь сеть и повтори подключение вручную."
+            }
+            return
+        }
         reconnectAttempt += 1
         let delay = min(30, 1 << min(reconnectAttempt - 1, 5))
         reconnectTask = Task { [weak self] in
@@ -460,17 +503,28 @@ final class TunnelManager: ObservableObject {
         guard !selectedHost.isEmpty, !isShuttingDown, monitor != nil else { return }
         syncPending = true
         guard syncTask == nil else { return }
+        let generation = UUID()
+        syncGeneration = generation
         syncTask = Task { [weak self] in
-            await self?.drainSyncRequests()
+            await self?.drainSyncRequests(generation: generation)
         }
     }
 
-    private func drainSyncRequests() async {
-        guard !isSyncing else { return }
+    private func drainSyncRequests(generation: UUID) async {
+        guard !isSyncing else {
+            if syncGeneration == generation {
+                syncTask = nil
+                syncGeneration = nil
+            }
+            return
+        }
         isSyncing = true
         defer {
             isSyncing = false
-            syncTask = nil
+            if syncGeneration == generation {
+                syncTask = nil
+                syncGeneration = nil
+            }
             if syncPending, !isShuttingDown {
                 requestSync()
             }
@@ -489,7 +543,7 @@ final class TunnelManager: ObservableObject {
                 activeForwards: activeForwards,
                 missingSince: missingSince
             )
-            let result = await Task.detached { TunnelEngine.cycle(input) }.value
+            let result = await TunnelEngine.cycle(input)
             guard !Task.isCancelled,
                   selectedHost == host,
                   monitorHost == host,
@@ -506,15 +560,23 @@ final class TunnelManager: ObservableObject {
         services = result.services
         state = result.state
         activeCount = result.activeForwards.count
+        if !result.forwardingStateIsAuthoritative {
+            activeCount = 0
+        }
         conflictCount = result.conflicts.count
         remoteCount = result.remoteCount
         lastError = result.error
         lastWarning = result.warning
         hostKeyChanged = result.hostKeyChanged
         lastSync = Date()
-        persistStatus(result)
+        if result.state == .connected {
+            try? DomaStatusStore.standard.write(result)
+        } else {
+            DomaStatusStore.standard.clear()
+        }
         scheduleDisappearanceSync()
         scheduleConflictRetry(hasConflicts: !result.conflicts.isEmpty)
+        scheduleDegradedRetry(isDegraded: !result.forwardingStateIsAuthoritative)
 
         if result.state == .failed {
             syncPending = false
@@ -527,11 +589,14 @@ final class TunnelManager: ObservableObject {
             disappearanceTask = nil
             conflictRetryTask?.cancel()
             conflictRetryTask = nil
+            degradedRetryTask?.cancel()
+            degradedRetryTask = nil
             if result.shouldRetryAutomatically {
                 scheduleReconnect(for: host)
             }
         } else {
             reconnectAttempt = 0
+            reconnectBudgetHost = host
         }
     }
 
@@ -560,41 +625,41 @@ final class TunnelManager: ObservableObject {
         }
     }
 
-    private func persistStatus(_ result: CycleResult) {
-        let payload: [String: Any] = [
-            "updatedAt": ISO8601DateFormatter().string(from: Date()),
-            "host": selectedHost,
-            "state": result.state.rawValue,
-            "masterPID": result.masterPID.map { $0 as Any } ?? NSNull(),
-            "activeForwards": result.activeForwards.sorted(),
-            "conflicts": result.conflicts.sorted(),
-            "remoteCount": result.remoteCount,
-            "error": result.error.map { $0 as Any } ?? NSNull(),
-            "warning": result.warning.map { $0 as Any } ?? NSNull(),
-            "services": result.services.map { service in
-                [
-                    "port": service.port,
-                    "name": service.name,
-                    "group": service.group,
-                    "kind": service.kind.rawValue,
-                    "details": service.details,
-                    "forwarded": service.isForwarded,
-                    "conflict": service.hasConflict,
-                ] as [String: Any]
-            },
-        ]
+    private func scheduleDegradedRetry(isDegraded: Bool) {
+        degradedRetryTask?.cancel()
+        degradedRetryTask = nil
+        guard isDegraded else { return }
+        degradedRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !Task.isCancelled else { return }
+            degradedRetryTask = nil
+            requestSync()
+        }
+    }
 
-        guard JSONSerialization.isValidJSONObject(payload),
-              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        else { return }
+    private func resetReconnectBudget(for host: String) {
+        reconnectBudgetHost = host
+        reconnectAttempt = 0
+    }
 
-        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Doma", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? data.write(to: directory.appendingPathComponent("status.json"), options: .atomic)
+    private func queueHostCleanup(_ host: String) -> Task<Void, Never>? {
+        guard !host.isEmpty else { return hostCleanupTask }
+        let predecessor = hostCleanupTask
+        let generation = UUID()
+        hostCleanupGeneration = generation
+        let task = Task { [weak self] in
+            await predecessor?.value
+            await TunnelEngine.stopMaster(host: host)
+            guard let self, hostCleanupGeneration == generation else { return }
+            hostCleanupTask = nil
+            hostCleanupGeneration = nil
+        }
+        hostCleanupTask = task
+        return task
     }
 
     private func resetRuntime(keepState: Bool = false) {
+        DomaStatusStore.standard.clear()
         masterPID = nil
         activeForwards = []
         missingSince = [:]
@@ -608,5 +673,54 @@ final class TunnelManager: ObservableObject {
         if !keepState {
             state = .disconnected
         }
+    }
+}
+
+struct DomaStatusStore: Sendable {
+    let directory: URL
+
+    static var standard: DomaStatusStore {
+        DomaStatusStore(
+            directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Doma", isDirectory: true)
+        )
+    }
+
+    var statusURL: URL {
+        directory.appendingPathComponent("status.json", isDirectory: false)
+    }
+
+    func write(_ result: CycleResult) throws {
+        let payload: [String: Any] = [
+            "schemaVersion": 2,
+            "updatedAt": ISO8601DateFormatter().string(from: Date()),
+            "state": result.state.rawValue,
+            "activeCount": result.forwardingStateIsAuthoritative ? result.activeForwards.count : 0,
+            "conflictCount": result.conflicts.count,
+            "remoteCount": result.remoteCount,
+            "degraded": !result.forwardingStateIsAuthoritative || result.warning != nil,
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
+        try data.write(to: statusURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: statusURL.path
+        )
+    }
+
+    func clear() {
+        try? FileManager.default.removeItem(at: statusURL)
     }
 }

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum TunnelEngine {
@@ -63,42 +64,95 @@ enum TunnelEngine {
         return cache.appendingPathComponent(String(format: "%016llx", fnv1a(host))).path
     }
 
-    static func stopMaster(host: String) {
-        shutdown(host: host, activeForwards: [])
+    static func stopMaster(host: String) async {
+        await shutdown(host: host, activeForwards: [])
     }
 
-    static func prepareMaster(host: String) -> SSHMasterPreparation {
-        ensureMaster(host: host, socket: socketPath(for: host))
+    static func prepareMaster(host: String) async -> SSHMasterPreparation {
+        await ensureMaster(host: host, socket: socketPath(for: host))
     }
 
-    static func shutdown(host: String, activeForwards: Set<Int>) {
-        let socket = socketPath(for: host)
-        for port in activeForwards.sorted() {
-            _ = control(host: host, socket: socket, operation: "cancel", port: port)
-        }
-
-        for _ in 0..<3 {
-            _ = CommandRunner.run(
-                ssh,
-                arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "exit", host],
-                timeout: 5
-            )
-            DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil)
-
-            for _ in 0..<10 {
-                let hasManagedMaster = DomaSSHMasterRegistry.masters().contains { $0.socketPath == socket }
-                if checkMaster(host: host, socket: socket) == nil, !hasManagedMaster {
-                    cleanupSocket(socket)
-                    return
-                }
-                Thread.sleep(forTimeInterval: 0.1)
+    static func shutdown(host: String, activeForwards _: Set<Int>) async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                shutdownSynchronously(host: host)
+                continuation.resume()
             }
         }
     }
 
-    static func cycle(_ input: CycleInput) -> CycleResult {
+    private static func shutdownSynchronously(host: String) {
+        let socket = socketPath(for: host)
+        // Exiting the master closes every owned forward in one bounded operation.
+        for attempt in 0..<5 {
+            _ = CommandRunner.run(
+                ssh,
+                arguments: [
+                    "-S", socket,
+                    "-o", "ControlMaster=no",
+                    "-O", "exit",
+                    host,
+                ],
+                timeout: 2
+            )
+            _ = DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil)
+            let master = checkMasterSynchronously(host: host, socket: socket)
+            if let master {
+                _ = Darwin.kill(pid_t(master), attempt < 2 ? SIGTERM : SIGKILL)
+            }
+            let registry = DomaSSHMasterRegistry.snapshot()
+            let hasManagedMaster = registry.masters.contains { $0.socketPath == socket }
+            if registry.isAuthoritative, master == nil, !hasManagedMaster {
+                cleanupSocket(socket)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        // Keep an unverifiable socket as a recovery handle. Removing it could orphan a master.
+    }
+
+    static func masterArguments(
+        host: String,
+        socket: String,
+        authentication: SSHAuthenticationConfiguration,
+        requiresExplicitConfirmation: Bool
+    ) -> [String] {
+        var arguments = [
+            "-fMN",
+            "-S", socket,
+            "-o", "ControlMaster=yes",
+            "-o", "ControlPersist=yes",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "TCPKeepAlive=yes",
+            "-o", "BatchMode=\(authentication.batchMode)",
+            "-o", "NumberOfPasswordPrompts=1",
+        ]
+        arguments.append(contentsOf: SSHInvocation.securityOptions)
+        if requiresExplicitConfirmation {
+            arguments.append(contentsOf: ["-o", "StrictHostKeyChecking=ask", "-o", "UpdateHostKeys=no"])
+        }
+        arguments.append(host)
+        return arguments
+    }
+
+    static func inventoryArguments(host: String, socket: String) -> [String] {
+        var arguments = [
+            "-S", socket,
+            "-o", "ControlMaster=no",
+            "-o", "ConnectTimeout=5",
+        ]
+        arguments.append(contentsOf: SSHInvocation.securityOptions)
+        arguments.append(contentsOf: [host, "--", "sh", "-s"])
+        return arguments
+    }
+
+    static func cycle(_ input: CycleInput) async -> CycleResult {
         let socket = socketPath(for: input.host)
-        let preparation = ensureMaster(host: input.host, socket: socket)
+        let preparation = await ensureMaster(host: input.host, socket: socket)
+        if Task.isCancelled {
+            return cancelledCycleResult(input)
+        }
         guard let masterPID = preparation.pid else {
             return CycleResult(
                 state: .failed,
@@ -115,7 +169,10 @@ enum TunnelEngine {
             )
         }
 
-        let inventoryResult = queryInventory(host: input.host, socket: socket)
+        let inventoryResult = await queryInventory(host: input.host, socket: socket)
+        if Task.isCancelled {
+            return cancelledCycleResult(input)
+        }
         guard inventoryResult.status == 0 else {
             let details = RemoteAccessErrorFormatter.inventoryDetails(
                 host: input.host,
@@ -137,14 +194,57 @@ enum TunnelEngine {
         }
 
         let inventory = parseInventory(inventoryResult.stdout)
+        guard inventory.sawSocketSection else {
+            return CycleResult(
+                state: .failed,
+                masterPID: masterPID,
+                activeForwards: input.activeForwards,
+                conflicts: [],
+                missingSince: input.missingSince,
+                services: [],
+                remoteCount: 0,
+                error: "SSH-сервер \(input.host) вернул неполный inventory без обязательной секции listening sockets. Состояние пробросов не изменено.",
+                warning: nil,
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false,
+                forwardingStateIsAuthoritative: false
+            )
+        }
         let remotePorts = Set(inventory.listeners.map(\.port).filter { 1024...32767 ~= $0 })
-        let local = LocalProcessController.listeners()
+        let localSnapshot = await LocalProcessController.snapshot()
+        if Task.isCancelled {
+            return cancelledCycleResult(input)
+        }
+        guard localSnapshot.isAuthoritative else {
+            return CycleResult(
+                state: .connected,
+                masterPID: masterPID,
+                activeForwards: input.activeForwards,
+                conflicts: [],
+                missingSince: input.missingSince,
+                services: makeServices(
+                    inventory: inventory,
+                    remotePorts: remotePorts,
+                    active: [],
+                    conflicts: [],
+                    localListeners: [:]
+                ),
+                remoteCount: remotePorts.count,
+                error: nil,
+                warning: combinedWarning(inventory.warningMessage, localSnapshot.warning),
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false,
+                forwardingStateIsAuthoritative: false
+            )
+        }
+        let local = localSnapshot.listeners
 
         var active = input.previousMasterPID == masterPID ? input.activeForwards : []
         var conflicts = Set<Int>()
         var missingSince = input.previousMasterPID == masterPID ? input.missingSince : [:]
 
         for port in Array(active) where !ownsForward(port: port, masterPID: masterPID, listeners: local) {
+            if Task.isCancelled { return cancelledCycleResult(input) }
             active.remove(port)
             missingSince.removeValue(forKey: port)
         }
@@ -155,10 +255,21 @@ enum TunnelEngine {
             missingSince[port] = missingAt
             guard now.timeIntervalSince(missingAt) >= disappearGrace else { continue }
 
-            let result = control(host: input.host, socket: socket, operation: "cancel", port: port)
+            if Task.isCancelled { return cancelledCycleResult(input) }
+            let result = await control(host: input.host, socket: socket, operation: "cancel", port: port)
+            if Task.isCancelled { return cancelledCycleResult(input) }
             if result.status == 0 {
                 active.remove(port)
                 missingSince.removeValue(forKey: port)
+            } else {
+                let checkedPID = await checkMaster(host: input.host, socket: socket)
+                if Task.isCancelled {
+                    cancelDiscoveredMaster(checkedPID, socket: socket)
+                    return cancelledCycleResult(input)
+                }
+                if checkedPID == nil {
+                    return connectionLostResult(input: input, result: result)
+                }
             }
         }
 
@@ -167,6 +278,7 @@ enum TunnelEngine {
         }
 
         for port in remotePorts.sorted() where !active.contains(port) {
+            if Task.isCancelled { return cancelledCycleResult(input) }
             guard active.count < forwardLimit else { break }
 
             if ownsForward(port: port, masterPID: masterPID, listeners: local) {
@@ -179,10 +291,19 @@ enum TunnelEngine {
                 continue
             }
 
-            let result = control(host: input.host, socket: socket, operation: "forward", port: port)
+            let result = await control(host: input.host, socket: socket, operation: "forward", port: port)
+            if Task.isCancelled { return cancelledCycleResult(input) }
             if result.status == 0 {
                 active.insert(port)
             } else {
+                let checkedPID = await checkMaster(host: input.host, socket: socket)
+                if Task.isCancelled {
+                    cancelDiscoveredMaster(checkedPID, socket: socket)
+                    return cancelledCycleResult(input)
+                }
+                if checkedPID == nil {
+                    return connectionLostResult(input: input, result: result)
+                }
                 conflicts.insert(port)
             }
         }
@@ -204,7 +325,7 @@ enum TunnelEngine {
             services: services,
             remoteCount: remotePorts.count,
             error: nil,
-            warning: inventory.warningMessage,
+            warning: combinedWarning(inventory.warningMessage, localSnapshot.warning),
             shouldRetryAutomatically: true,
             hostKeyChanged: false
         )
@@ -216,18 +337,57 @@ enum TunnelEngine {
         }
     }
 
-    private static func ensureMaster(host: String, socket: String) -> SSHMasterPreparation {
-        if let pid = checkMaster(host: host, socket: socket) {
-            DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
+    private static func ensureMaster(host: String, socket: String) async -> SSHMasterPreparation {
+        guard let knownHostsPlan = await SSHKnownHostsManager.resolvePlanAsync(host: host) else {
             return SSHMasterPreparation(
-                pid: pid,
-                error: nil,
-                shouldRetryAutomatically: true,
+                pid: nil,
+                error: "Не удалось безопасно определить effective known_hosts target для \(host). Подключение остановлено.",
+                shouldRetryAutomatically: false,
                 hostKeyChanged: false
             )
         }
+        let hostKeyTarget = knownHostsPlan.target
+        let requiresConfirmation: Bool
+        do {
+            requiresConfirmation = try SSHHostTrustState.requiresExplicitConfirmation(for: hostKeyTarget)
+        } catch {
+            return SSHMasterPreparation(
+                pid: nil,
+                error: "Не удалось безопасно проверить состояние подтверждения SSH-ключа для \(host). Подключение остановлено.\n\n\(error.localizedDescription)",
+                shouldRetryAutomatically: false,
+                hostKeyChanged: false
+            )
+        }
+        if !requiresConfirmation {
+            let existingPID = await checkMaster(host: host, socket: socket)
+            if Task.isCancelled {
+                cancelDiscoveredMaster(existingPID, socket: socket)
+                return cancelledPreparation()
+            }
+            if let existingPID {
+                _ = await DomaSSHMasterRegistry.terminateMastersAsync(
+                    socketPath: socket,
+                    keeping: Int32(existingPID)
+                )
+                if Task.isCancelled {
+                    cancelDiscoveredMaster(existingPID, socket: socket)
+                    return cancelledPreparation()
+                }
+                return SSHMasterPreparation(
+                    pid: existingPID,
+                    error: nil,
+                    shouldRetryAutomatically: true,
+                    hostKeyChanged: false
+                )
+            }
+        }
 
-        guard DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil) else {
+        guard await DomaSSHMasterRegistry.terminateMastersAsync(socketPath: socket, keeping: nil) else {
+            if Task.isCancelled {
+                _ = DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil)
+                cleanupSocket(socket)
+                return cancelledPreparation()
+            }
             return SSHMasterPreparation(
                 pid: nil,
                 error: "Не удалось завершить прежнее SSH-соединение для \(host).",
@@ -237,24 +397,26 @@ enum TunnelEngine {
         }
         cleanupSocket(socket)
         let authentication = SSHAuthentication.configuration()
-        let result = CommandRunner.run(
+        let arguments = masterArguments(
+            host: host,
+            socket: socket,
+            authentication: authentication,
+            requiresExplicitConfirmation: requiresConfirmation
+        )
+        let result = await CommandRunner.runAsync(
             ssh,
-            arguments: [
-                "-fMN",
-                "-S", socket,
-                "-o", "ControlMaster=yes",
-                "-o", "ControlPersist=yes",
-                "-o", "ServerAliveInterval=15",
-                "-o", "ServerAliveCountMax=3",
-                "-o", "TCPKeepAlive=yes",
-                "-o", "BatchMode=\(authentication.batchMode)",
-                "-o", "NumberOfPasswordPrompts=1",
-                host,
-            ],
+            arguments: arguments,
             environment: authentication.environment,
             timeout: 300
         )
+        if Task.isCancelled {
+            _ = DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil)
+            cleanupSocket(socket)
+            return cancelledPreparation()
+        }
         guard result.status == 0 else {
+            _ = await DomaSSHMasterRegistry.terminateMastersAsync(socketPath: socket, keeping: nil)
+            cleanupSocket(socket)
             let details = SSHConnectionErrorFormatter.details(host: host, result: result)
             return SSHMasterPreparation(
                 pid: nil,
@@ -265,16 +427,36 @@ enum TunnelEngine {
         }
 
         for _ in 0..<20 {
-            if let pid = checkMaster(host: host, socket: socket) {
-                DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
+            if Task.isCancelled {
+                _ = DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil)
+                cleanupSocket(socket)
+                return cancelledPreparation()
+            }
+            let discoveredPID = await checkMaster(host: host, socket: socket)
+            if Task.isCancelled {
+                cancelDiscoveredMaster(discoveredPID, socket: socket)
+                return cancelledPreparation()
+            }
+            if let discoveredPID {
+                _ = await DomaSSHMasterRegistry.terminateMastersAsync(
+                    socketPath: socket,
+                    keeping: Int32(discoveredPID)
+                )
+                if Task.isCancelled {
+                    cancelDiscoveredMaster(discoveredPID, socket: socket)
+                    return cancelledPreparation()
+                }
+                if requiresConfirmation {
+                    try? SSHHostTrustState.markConfirmed(target: hostKeyTarget)
+                }
                 return SSHMasterPreparation(
-                    pid: pid,
+                    pid: discoveredPID,
                     error: nil,
                     shouldRetryAutomatically: true,
                     hostKeyChanged: false
                 )
             }
-            Thread.sleep(forTimeInterval: 0.25)
+            try? await Task.sleep(for: .milliseconds(250))
         }
         return SSHMasterPreparation(
             pid: nil,
@@ -284,11 +466,21 @@ enum TunnelEngine {
         )
     }
 
-    private static func checkMaster(host: String, socket: String) -> Int? {
-        let result = CommandRunner.run(
+    private static func checkMaster(host: String, socket: String) async -> Int? {
+        let result = await CommandRunner.runAsync(
             ssh,
             arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "check", host],
             timeout: 5
+        )
+        guard result.status == 0 else { return nil }
+        return firstCapture(in: result.stdout + result.stderr, pattern: #"pid=(\d+)"#).flatMap(Int.init)
+    }
+
+    private static func checkMasterSynchronously(host: String, socket: String) -> Int? {
+        let result = CommandRunner.run(
+            ssh,
+            arguments: ["-S", socket, "-o", "ControlMaster=no", "-O", "check", host],
+            timeout: 2
         )
         guard result.status == 0 else { return nil }
         return firstCapture(in: result.stdout + result.stderr, pattern: #"pid=(\d+)"#).flatMap(Int.init)
@@ -305,8 +497,8 @@ enum TunnelEngine {
         }
     }
 
-    private static func control(host: String, socket: String, operation: String, port: Int) -> CommandResult {
-        CommandRunner.run(
+    private static func control(host: String, socket: String, operation: String, port: Int) async -> CommandResult {
+        await CommandRunner.runAsync(
             ssh,
             arguments: [
                 "-S", socket,
@@ -319,19 +511,30 @@ enum TunnelEngine {
         )
     }
 
-    private static func queryInventory(host: String, socket: String) -> CommandResult {
-        return CommandRunner.run(
+    private static func queryInventory(host: String, socket: String) async -> CommandResult {
+        return await CommandRunner.runAsync(
             ssh,
-            arguments: [
-                "-S", socket,
-                "-o", "ControlMaster=no",
-                "-o", "ConnectTimeout=5",
-                host,
-                "--", "sh", "-s",
-            ],
+            arguments: inventoryArguments(host: host, socket: socket),
             stdin: inventoryScript,
             timeout: 10
         )
+    }
+
+    private static func cancelledPreparation() -> SSHMasterPreparation {
+        SSHMasterPreparation(
+            pid: nil,
+            error: "SSH-подключение отменено.",
+            shouldRetryAutomatically: false,
+            hostKeyChanged: false
+        )
+    }
+
+    private static func cancelDiscoveredMaster(_ pid: Int?, socket: String) {
+        if let pid {
+            _ = Darwin.kill(pid_t(pid), SIGTERM)
+        }
+        _ = DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil)
+        cleanupSocket(socket)
     }
 
     private static func ownsForward(port: Int, masterPID: Int, listeners: [Int: LocalListenerInfo]) -> Bool {
@@ -341,12 +544,53 @@ enum TunnelEngine {
         }
     }
 
+    static func connectionLostResult(input: CycleInput, result: CommandResult) -> CycleResult {
+        let details = SSHConnectionErrorFormatter.details(host: input.host, result: result)
+        return CycleResult(
+            state: .failed,
+            masterPID: nil,
+            activeForwards: input.activeForwards,
+            conflicts: [],
+            missingSince: input.missingSince,
+            services: [],
+            remoteCount: 0,
+            error: "SSH-соединение с \(input.host) потеряно во время изменения проброса.\n\n\(details.message)",
+            warning: nil,
+            shouldRetryAutomatically: true,
+            hostKeyChanged: false
+        )
+    }
+
+    private static func cancelledCycleResult(_ input: CycleInput) -> CycleResult {
+        CycleResult(
+            state: .disconnected,
+            masterPID: nil,
+            activeForwards: input.activeForwards,
+            conflicts: [],
+            missingSince: input.missingSince,
+            services: [],
+            remoteCount: 0,
+            error: nil,
+            warning: nil,
+            shouldRetryAutomatically: false,
+            hostKeyChanged: false,
+            forwardingStateIsAuthoritative: false
+        )
+    }
+
+    private static func combinedWarning(_ first: String?, _ second: String?) -> String? {
+        let warning = [first, second].compactMap { $0 }.joined(separator: " ")
+        return warning.isEmpty ? nil : warning
+    }
+
     private struct Inventory {
         var listeners: [RawListener] = []
         var dockerByPort: [Int: DockerInfo] = [:]
         var processes: [Int: ProcessInfo] = [:]
         var cwdByPID: [Int: String] = [:]
         var warnings = Set<InventoryWarning>()
+        var sawSocketSection = false
+        var sawProcessSection = false
 
         var warningMessage: String? {
             let messages = warnings.sorted { $0.rawValue < $1.rawValue }.map(\.message)
@@ -356,7 +600,10 @@ enum TunnelEngine {
 
     private enum InventoryWarning: String {
         case docker
+        case partialProcesses
+        case partialSockets
         case processes
+        case protocolSections
 
         var message: String {
             switch self {
@@ -364,6 +611,12 @@ enum TunnelEngine {
                 "Метаданные Docker недоступны; порты продолжают пробрасываться как TCP."
             case .processes:
                 "Метаданные процессов недоступны; порты продолжают пробрасываться как TCP."
+            case .partialSockets:
+                "Часть listening sockets пришла без PID/имени процесса; TCP-пробросы продолжают работать."
+            case .partialProcesses:
+                "Часть процессов не сопоставилась с listening sockets; TCP-пробросы продолжают работать."
+            case .protocolSections:
+                "Удалённый inventory вернул неполный набор секций; доступные TCP-порты продолжают пробрасываться."
             }
         }
     }
@@ -384,9 +637,13 @@ enum TunnelEngine {
             }
 
             switch line {
-            case "__SS__": section = .ss
+            case "__SS__":
+                inventory.sawSocketSection = true
+                section = .ss
             case "__DOCKER__": section = .docker
-            case "__PS__": section = .ps
+            case "__PS__":
+                inventory.sawProcessSection = true
+                section = .ps
             case "__CWD__": section = .cwd
             default:
                 switch section {
@@ -420,11 +677,26 @@ enum TunnelEngine {
                 }
             }
         }
+        if !inventory.sawProcessSection {
+            inventory.warnings.insert(.protocolSections)
+        }
+        if inventory.listeners.contains(where: { $0.pid == nil || $0.command == nil }) {
+            inventory.warnings.insert(.partialSockets)
+        }
+        let listenerPIDs = Set(inventory.listeners.compactMap(\.pid))
+        let missingProcessCount = listenerPIDs.subtracting(inventory.processes.keys).count
+        if missingProcessCount >= max(1, listenerPIDs.count / 2), !listenerPIDs.isEmpty {
+            inventory.warnings.insert(.partialProcesses)
+        }
         return inventory
     }
 
     static func inventoryWarning(in output: String) -> String? {
         parseInventory(output).warningMessage
+    }
+
+    static func hasMandatorySocketSection(in output: String) -> Bool {
+        parseInventory(output).sawSocketSection
     }
 
     private static func makeServices(

@@ -5,11 +5,17 @@ final class RemoteInventoryMonitorTests: XCTestCase {
     func testParserRecognizesMarkersAcrossArbitraryChunks() {
         var parser = RemoteMonitorOutputParser()
 
-        XCTAssertEqual(parser.consume(Data("ignored\n__DOMA_INVEN".utf8)), 0)
-        XCTAssertEqual(parser.consume(Data("TORY_CHANGED__ 42 7\n".utf8)), 1)
+        XCTAssertEqual(
+            parser.consume(Data("ignored\n__DOMA_INVEN".utf8)),
+            RemoteMonitorParseResult(changeDetected: false, protocolError: nil)
+        )
+        XCTAssertEqual(
+            parser.consume(Data("TORY_CHANGED__ 42 7\n".utf8)),
+            RemoteMonitorParseResult(changeDetected: true, protocolError: nil)
+        )
         XCTAssertEqual(
             parser.consume(Data("__DOMA_INVENTORY_CHANGED__\nnoise\n__DOMA_INVENTORY_CHANGED__ 43 8\n".utf8)),
-            2
+            RemoteMonitorParseResult(changeDetected: true, protocolError: nil)
         )
     }
 
@@ -19,10 +25,27 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertTrue(RemoteMonitorOutputParser.isChangeLine("__DOMA_INVENTORY_CHANGED__ 42 7"))
     }
 
+    func testParserBoundsHostileNoNewlineOutput() {
+        var parser = RemoteMonitorOutputParser()
+        let result = parser.consume(Data(repeating: 0x41, count: 20_000))
+
+        XCTAssertFalse(result.changeDetected)
+        XCTAssertNotNil(result.protocolError)
+    }
+
+    func testParserCoalescesMarkerFloodAndFailsSafely() {
+        var parser = RemoteMonitorOutputParser()
+        let flood = String(repeating: "__DOMA_INVENTORY_CHANGED__\n", count: 600)
+        let result = parser.consume(Data(flood.utf8))
+
+        XCTAssertNotNil(result.protocolError)
+    }
+
     func testWatcherHotPathOnlyHashesListeningSocketRows() {
         let script = RemoteInventoryMonitor.watcherScript
 
         XCTAssertTrue(script.contains("/proc/net/tcp"))
+        XCTAssertTrue(script.contains("/proc/net/tcp6"))
         XCTAssertTrue(script.contains(#"$4 == "0A""#))
         XCTAssertTrue(script.contains(#"port >= "x0400""#))
         XCTAssertTrue(script.contains(#"port <= "x7FFF""#))
@@ -39,8 +62,48 @@ final class RemoteInventoryMonitorTests: XCTestCase {
 
         XCTAssertTrue(script.contains(RemoteAccessErrorFormatter.permissionMarker))
         XCTAssertTrue(script.contains(RemoteAccessErrorFormatter.dependencyMarker))
+        XCTAssertTrue(script.contains(RemoteAccessErrorFormatter.watcherReadMarker))
         XCTAssertTrue(script.contains("exit 77"))
         XCTAssertTrue(script.contains("exit 127"))
+    }
+
+    func testWatcherRejectsUnreadableTCP6InsteadOfMaskingIt() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DomaWatcherTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let tcp = directory.appendingPathComponent("tcp")
+        let tcp6 = directory.appendingPathComponent("tcp6")
+        try "header\n".write(to: tcp, atomically: true, encoding: .utf8)
+        try "header\n".write(to: tcp6, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: tcp6.path)
+        let script = RemoteInventoryMonitor.watcherScript
+            .replacingOccurrences(of: "/proc/net/tcp6", with: tcp6.path)
+            .replacingOccurrences(of: "/proc/net/tcp", with: tcp.path)
+
+        let result = CommandRunner.run("/bin/sh", arguments: ["-s"], stdin: script, timeout: 2)
+
+        XCTAssertEqual(result.status, 77, result.stderr)
+        XCTAssertTrue(result.stderr.contains(RemoteAccessErrorFormatter.permissionMarker))
+        XCTAssertTrue(result.stderr.contains(tcp6.path))
+    }
+
+    func testWatcherReadFailureRetriesAndPermissionFailureDoesNot() {
+        let transient = RemoteAccessErrorFormatter.monitorTermination(
+            host: "devbox",
+            status: 75,
+            stderr: "__DOMA_WATCHER_READ_FAILED__ /proc/net/tcp6 vanished"
+        )
+        let permanent = RemoteAccessErrorFormatter.monitorTermination(
+            host: "devbox",
+            status: 77,
+            stderr: "__DOMA_PERMISSION_DENIED__ cannot read /proc/net/tcp6"
+        )
+
+        XCTAssertTrue(transient.shouldRetryAutomatically)
+        XCTAssertTrue(transient.message?.contains("Временная ошибка") == true)
+        XCTAssertFalse(permanent.shouldRetryAutomatically)
     }
 
     func testMonitorPermissionFailureStopsAutomaticRetries() {
@@ -105,6 +168,54 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertTrue(warning?.contains("продолжают пробрасываться") == true)
     }
 
+    func testPartialSocketAndProcessMetadataProduceNonfatalWarning() {
+        let output = """
+        __SS__
+        LISTEN 0 128 127.0.0.1:4321 0.0.0.0:*
+        LISTEN 0 128 127.0.0.1:4322 0.0.0.0:* users:(("demo",pid=42,fd=3))
+        __DOCKER__
+        __PS__
+        __CWD__
+        """
+
+        let warning = TunnelEngine.inventoryWarning(in: output)
+
+        XCTAssertTrue(warning?.contains("без PID") == true)
+        XCTAssertTrue(warning?.contains("не сопоставилась") == true)
+        XCTAssertTrue(warning?.contains("продолжают работать") == true)
+    }
+
+    func testMissingMandatorySocketSectionIsRejected() {
+        let output = """
+        __DOCKER__
+        __PS__
+        __CWD__
+        """
+
+        XCTAssertFalse(TunnelEngine.hasMandatorySocketSection(in: output))
+    }
+
+    func testEveryOwnedSSHSessionDisablesAmbientForwardingAndLocalCommands() {
+        let authentication = SSHAuthenticationConfiguration(batchMode: "no", environment: nil)
+        let argumentSets = [
+            TunnelEngine.masterArguments(
+                host: "devbox",
+                socket: "/tmp/doma-test.sock",
+                authentication: authentication,
+                requiresExplicitConfirmation: true
+            ),
+            TunnelEngine.inventoryArguments(host: "devbox", socket: "/tmp/doma-test.sock"),
+            RemoteInventoryMonitor.sshArguments(host: "devbox", socketPath: "/tmp/doma-test.sock"),
+        ]
+
+        for arguments in argumentSets {
+            XCTAssertTrue(arguments.containsConsecutive("-o", "ForwardAgent=no"))
+            XCTAssertTrue(arguments.containsConsecutive("-o", "ForwardX11=no"))
+            XCTAssertTrue(arguments.containsConsecutive("-o", "PermitLocalCommand=no"))
+            XCTAssertFalse(arguments.contains("ClearAllForwardings=yes"))
+        }
+    }
+
     func testSSHAuthenticationFailureIsNotMistakenForRemotePermissionFailure() {
         let termination = RemoteAccessErrorFormatter.monitorTermination(
             host: "devbox",
@@ -113,5 +224,33 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         )
 
         XCTAssertFalse(termination.message?.contains("/proc/net/tcp") == true)
+    }
+
+    func testControlMasterLossIsConnectionFailureNotPortConflict() {
+        let result = TunnelEngine.connectionLostResult(
+            input: CycleInput(
+                host: "devbox",
+                previousMasterPID: 42,
+                activeForwards: [4321],
+                missingSince: [:]
+            ),
+            result: CommandResult(
+                status: 255,
+                stdout: "",
+                stderr: "Control socket connect: Connection refused"
+            )
+        )
+
+        XCTAssertEqual(result.state, .failed)
+        XCTAssertTrue(result.conflicts.isEmpty)
+        XCTAssertNil(result.masterPID)
+        XCTAssertTrue(result.error?.contains("потеряно") == true)
+        XCTAssertTrue(result.shouldRetryAutomatically)
+    }
+}
+
+private extension Array where Element == String {
+    func containsConsecutive(_ first: String, _ second: String) -> Bool {
+        zip(self, dropFirst()).contains { $0 == first && $1 == second }
     }
 }

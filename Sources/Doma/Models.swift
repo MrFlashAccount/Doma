@@ -101,6 +101,35 @@ struct CycleResult: Sendable {
     let warning: String?
     let shouldRetryAutomatically: Bool
     let hostKeyChanged: Bool
+    let forwardingStateIsAuthoritative: Bool
+
+    init(
+        state: ConnectionState,
+        masterPID: Int?,
+        activeForwards: Set<Int>,
+        conflicts: Set<Int>,
+        missingSince: [Int: Date],
+        services: [RemoteService],
+        remoteCount: Int,
+        error: String?,
+        warning: String?,
+        shouldRetryAutomatically: Bool,
+        hostKeyChanged: Bool,
+        forwardingStateIsAuthoritative: Bool = true
+    ) {
+        self.state = state
+        self.masterPID = masterPID
+        self.activeForwards = activeForwards
+        self.conflicts = conflicts
+        self.missingSince = missingSince
+        self.services = services
+        self.remoteCount = remoteCount
+        self.error = error
+        self.warning = warning
+        self.shouldRetryAutomatically = shouldRetryAutomatically
+        self.hostKeyChanged = hostKeyChanged
+        self.forwardingStateIsAuthoritative = forwardingStateIsAuthoritative
+    }
 }
 
 struct SSHMasterPreparation: Sendable {

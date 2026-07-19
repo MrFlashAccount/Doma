@@ -1,23 +1,47 @@
 import Foundation
 
+struct RemoteMonitorParseResult: Equatable, Sendable {
+    let changeDetected: Bool
+    let protocolError: String?
+}
+
 struct RemoteMonitorOutputParser {
     private static let changeMarker = "__DOMA_INVENTORY_CHANGED__"
+    private static let maximumBufferedBytes = 16_384
+    private static let maximumLinesPerChunk = 512
     private var buffer = Data()
 
-    mutating func consume(_ data: Data) -> Int {
+    mutating func consume(_ data: Data) -> RemoteMonitorParseResult {
         buffer.append(data)
-        var changes = 0
+        guard buffer.count <= Self.maximumBufferedBytes else {
+            buffer.removeAll(keepingCapacity: false)
+            return RemoteMonitorParseResult(
+                changeDetected: false,
+                protocolError: "remote monitor produced a line larger than \(Self.maximumBufferedBytes) bytes"
+            )
+        }
+
+        var changeDetected = false
+        var processedLines = 0
 
         while let newline = buffer.firstIndex(of: 0x0A) {
+            processedLines += 1
+            guard processedLines <= Self.maximumLinesPerChunk else {
+                buffer.removeAll(keepingCapacity: false)
+                return RemoteMonitorParseResult(
+                    changeDetected: changeDetected,
+                    protocolError: "remote monitor flooded the channel with markers"
+                )
+            }
             let lineData = buffer[..<newline]
             buffer.removeSubrange(...newline)
             guard let line = String(data: lineData, encoding: .utf8) else { continue }
             if Self.isChangeLine(line) {
-                changes += 1
+                changeDetected = true
             }
         }
 
-        return changes
+        return RemoteMonitorParseResult(changeDetected: changeDetected, protocolError: nil)
     }
 
     static func isChangeLine(_ line: String) -> Bool {
@@ -35,6 +59,14 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
       printf '__DOMA_PERMISSION_DENIED__ cannot read /proc/net/tcp\n' >&2
       exit 77
     fi
+    set -- /proc/net/tcp
+    if [ -e /proc/net/tcp6 ]; then
+      if [ ! -r /proc/net/tcp6 ]; then
+        printf '__DOMA_PERMISSION_DENIED__ cannot read /proc/net/tcp6\n' >&2
+        exit 77
+      fi
+      set -- "$@" /proc/net/tcp6
+    fi
     for tool in awk sort cksum sleep; do
       if ! command -v "$tool" >/dev/null 2>&1; then
         printf '__DOMA_DEPENDENCY_MISSING__ %s is unavailable\n' "$tool" >&2
@@ -43,20 +75,42 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
     done
 
     doma_listener_signature() {
-      awk '$4 == "0A" {
+      rows=$(awk '$4 == "0A" {
         split($2, local_address, ":")
         port = "x" toupper(local_address[2])
         if (port >= "x0400" && port <= "x7FFF") {
           print FILENAME, $2, $10
         }
-      }' /proc/net/tcp /proc/net/tcp6 2>/dev/null \
-        | LC_ALL=C sort \
-        | cksum
+      }' "$@" 2>&1)
+      status=$?
+      if [ "$status" -ne 0 ]; then
+        case "$rows" in
+          *ermission\ denied*) printf '__DOMA_PERMISSION_DENIED__ %s\n' "$rows" >&2; return 77 ;;
+          *) printf '__DOMA_WATCHER_READ_FAILED__ %s\n' "$rows" >&2; return 75 ;;
+        esac
+      fi
+      sorted=$(printf '%s\n' "$rows" | LC_ALL=C sort 2>&1)
+      status=$?
+      if [ "$status" -ne 0 ]; then
+        printf '__DOMA_WATCHER_READ_FAILED__ %s\n' "$sorted" >&2
+        return 75
+      fi
+      checksum=$(printf '%s\n' "$sorted" | cksum 2>&1)
+      status=$?
+      if [ "$status" -ne 0 ]; then
+        printf '__DOMA_WATCHER_READ_FAILED__ %s\n' "$checksum" >&2
+        return 75
+      fi
+      printf '%s\n' "$checksum"
     }
 
     previous=''
     while :; do
-      current=$(doma_listener_signature)
+      current=$(doma_listener_signature "$@")
+      status=$?
+      if [ "$status" -ne 0 ]; then
+        exit "$status"
+      fi
       if [ "$current" != "$previous" ]; then
         printf '__DOMA_INVENTORY_CHANGED__ %s\n' "$current"
         previous=$current
@@ -85,6 +139,18 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
         self.socketPath = socketPath
     }
 
+    static func sshArguments(host: String, socketPath: String) -> [String] {
+        var arguments = [
+            "-S", socketPath,
+            "-o", "ControlMaster=no",
+            "-o", "ConnectTimeout=5",
+            "-o", "BatchMode=yes",
+        ]
+        arguments.append(contentsOf: SSHInvocation.securityOptions)
+        arguments.append(contentsOf: [host, "--", "sh", "-s"])
+        return arguments
+    }
+
     func start(
         onChange: @escaping @Sendable () -> Void,
         onTermination: @escaping @Sendable (RemoteMonitorTermination) -> Void
@@ -95,14 +161,7 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
         let input = Pipe()
 
         process.executableURL = URL(fileURLWithPath: Self.ssh)
-        process.arguments = [
-            "-S", socketPath,
-            "-o", "ControlMaster=no",
-            "-o", "ConnectTimeout=5",
-            "-o", "BatchMode=yes",
-            host,
-            "--", "sh", "-s",
-        ]
+        process.arguments = Self.sshArguments(host: host, socketPath: socketPath)
         process.standardOutput = output
         process.standardError = errors
         process.standardInput = input
@@ -163,18 +222,22 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
     }
 
     private func consumeOutput(_ data: Data) {
-        queue.async { [weak self] in
+        queue.sync { [weak self] in
             guard let self, !stopping else { return }
-            let changeCount = parser.consume(data)
-            guard let onChange else { return }
-            for _ in 0..<changeCount {
-                onChange()
+            let result = parser.consume(data)
+            if let protocolError = result.protocolError {
+                stderr.append(Data("__DOMA_PROTOCOL_ERROR__ \(protocolError)\n".utf8))
+                process?.terminate()
+                return
+            }
+            if result.changeDetected {
+                onChange?()
             }
         }
     }
 
     private func consumeError(_ data: Data) {
-        queue.async { [weak self] in
+        queue.sync { [weak self] in
             guard let self, !stopping else { return }
             stderr.append(data)
             if stderr.count > 16_384 {

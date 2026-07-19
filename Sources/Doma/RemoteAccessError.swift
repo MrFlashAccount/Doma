@@ -4,6 +4,8 @@ enum RemoteAccessErrorFormatter {
     static let permissionMarker = "__DOMA_PERMISSION_DENIED__"
     static let dependencyMarker = "__DOMA_DEPENDENCY_MISSING__"
     static let socketScanMarker = "__DOMA_SOCKET_SCAN_FAILED__"
+    static let watcherReadMarker = "__DOMA_WATCHER_READ_FAILED__"
+    static let protocolMarker = "__DOMA_PROTOCOL_ERROR__"
 
     static func inventoryDetails(host: String, result: CommandResult) -> RemoteAccessErrorDetails {
         let diagnostic = combinedOutput(result)
@@ -36,6 +38,12 @@ enum RemoteAccessErrorFormatter {
         if diagnostic.contains(socketScanMarker) {
             return RemoteAccessErrorDetails(
                 message: "Не удалось прочитать listening sockets на SSH-сервере \(host).\(diagnosticSuffix(diagnostic))",
+                shouldRetryAutomatically: true
+            )
+        }
+        if diagnostic.contains(watcherReadMarker) {
+            return RemoteAccessErrorDetails(
+                message: "Временная ошибка чтения listening sockets на SSH-сервере \(host). Doma повторит подключение с ограниченной задержкой.\(diagnosticSuffix(diagnostic))",
                 shouldRetryAutomatically: true
             )
         }
@@ -73,6 +81,18 @@ enum RemoteAccessErrorFormatter {
                 shouldRetryAutomatically: false
             )
         }
+        if stderr.contains(protocolMarker) {
+            return RemoteMonitorTermination(
+                message: "Удалённый монитор \(host) нарушил протокол вывода. Канал закрыт безопасно; Doma выполнит ограниченную повторную попытку.\(diagnosticSuffix(stderr))",
+                shouldRetryAutomatically: true
+            )
+        }
+        if stderr.contains(watcherReadMarker) {
+            return RemoteMonitorTermination(
+                message: "Временная ошибка чтения listening sockets на SSH-сервере \(host). Doma выполнит ограниченную повторную попытку.\(diagnosticSuffix(stderr))",
+                shouldRetryAutomatically: true
+            )
+        }
         let raw = lastMeaningfulLine(stderr)
         return RemoteMonitorTermination(
             message: raw.isEmpty && status != 0 ? "Remote monitor exited with status \(status)" : raw.nilIfEmpty,
@@ -96,7 +116,7 @@ enum RemoteAccessErrorFormatter {
 
     private static func diagnosticSuffix(_ diagnostic: String) -> String {
         let raw = lastMeaningfulLine(diagnostic)
-        let detail = [permissionMarker, dependencyMarker, socketScanMarker]
+        let detail = [permissionMarker, dependencyMarker, socketScanMarker, watcherReadMarker, protocolMarker]
             .reduce(raw) { value, marker in
                 value.replacingOccurrences(of: marker, with: "")
             }
