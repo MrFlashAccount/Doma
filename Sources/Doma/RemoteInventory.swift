@@ -110,10 +110,14 @@ enum RemoteInventoryParser {
                         in: line,
                         pattern: #"\(\(\"([^\"]+)\""#
                     )
+                    // iproute2's `ss -e` only emits `uid:` when the numeric UID is
+                    // nonzero (`if (s->uid)`). Since this socket row was read
+                    // successfully, a missing field represents root (UID 0), not
+                    // unknown ownership.
                     let userID = RemoteTextMatching.firstCapture(
                         in: line,
                         pattern: #"uid:(\d+)"#
-                    ).flatMap(Int.init)
+                    ).flatMap(Int.init) ?? 0
                     inventory.listeners.append(
                         RemoteListenerRecord(
                             port: port,
