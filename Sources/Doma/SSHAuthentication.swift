@@ -49,46 +49,76 @@ enum SSHAuthentication {
 }
 
 enum SSHConnectionErrorFormatter {
-    static func details(host: String, result: CommandResult) -> (message: String, shouldRetryAutomatically: Bool) {
-        let raw = lastMeaningfulLine(result.stderr.isEmpty ? result.stdout : result.stderr)
-        let lowercased = raw.lowercased()
+    static func details(host: String, result: CommandResult) -> SSHConnectionErrorDetails {
+        let diagnostic = [result.stdout, result.stderr]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        let raw = lastMeaningfulLine(diagnostic)
+        let lowercased = diagnostic.lowercased()
+
+        if lowercased.contains("remote host identification has changed") {
+            return SSHConnectionErrorDetails(
+                message: "Ключ SSH-сервера \(host) изменился. Это может быть ожидаемой заменой или признаком атаки. Автоматическое подключение остановлено. Сверь новый fingerprint с администратором перед продолжением.",
+                shouldRetryAutomatically: false,
+                hostKeyChanged: true
+            )
+        }
 
         if lowercased.contains("permission denied")
             || lowercased.contains("too many authentication failures")
         {
-            return (
-                "Сервер отклонил учётные данные для \(host). Проверь логин, пароль или SSH-ключ.",
-                false
+            return SSHConnectionErrorDetails(
+                message: "Сервер отклонил учётные данные для \(host). Проверь логин, пароль или SSH-ключ.",
+                shouldRetryAutomatically: false,
+                hostKeyChanged: false
             )
         }
-        if lowercased.contains("host key verification failed")
-            || lowercased.contains("remote host identification has changed")
-        {
-            return (
-                "Не удалось подтвердить ключ сервера \(host). Проверь fingerprint и запись в known_hosts.",
-                false
+        if lowercased.contains("host key verification failed") {
+            return SSHConnectionErrorDetails(
+                message: "Ключ SSH-сервера \(host) не был подтверждён. Проверь fingerprint перед повторной попыткой.",
+                shouldRetryAutomatically: false,
+                hostKeyChanged: false
             )
         }
         if lowercased.contains("could not resolve hostname")
             || lowercased.contains("name or service not known")
         {
-            return ("Не удалось найти SSH-сервер \(host). Проверь SSH alias и сеть.", true)
+            return SSHConnectionErrorDetails(
+                message: "Не удалось найти SSH-сервер \(host). Проверь SSH alias и сеть.",
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false
+            )
         }
         if lowercased.contains("connection refused") {
-            return ("SSH-сервер \(host) отклонил соединение. Проверь адрес, порт и запущен ли sshd.", true)
+            return SSHConnectionErrorDetails(
+                message: "SSH-сервер \(host) отклонил соединение. Проверь адрес, порт и запущен ли sshd.",
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false
+            )
         }
         if lowercased.contains("operation timed out")
             || lowercased.contains("connection timed out")
         {
-            return ("SSH-сервер \(host) не ответил вовремя. Проверь сеть, VPN и доступность хоста.", true)
+            return SSHConnectionErrorDetails(
+                message: "SSH-сервер \(host) не ответил вовремя. Проверь сеть, VPN и доступность хоста.",
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false
+            )
         }
         if lowercased.contains("no route to host") {
-            return ("До SSH-сервера \(host) нет сетевого маршрута. Проверь сеть или VPN.", true)
+            return SSHConnectionErrorDetails(
+                message: "До SSH-сервера \(host) нет сетевого маршрута. Проверь сеть или VPN.",
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false
+            )
         }
 
         let fallback = "Не удалось подключиться к SSH-серверу \(host)."
-        guard !raw.isEmpty else { return (fallback, true) }
-        return (fallback + "\n\n" + raw, true)
+        return SSHConnectionErrorDetails(
+            message: raw.isEmpty ? fallback : fallback + "\n\n" + raw,
+            shouldRetryAutomatically: true,
+            hostKeyChanged: false
+        )
     }
 
     private static func lastMeaningfulLine(_ text: String) -> String {

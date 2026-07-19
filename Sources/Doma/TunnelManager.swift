@@ -14,6 +14,7 @@ final class TunnelManager: ObservableObject {
     @Published private(set) var conflictCount = 0
     @Published private(set) var remoteCount = 0
     @Published private(set) var lastError: String?
+    @Published private(set) var hostKeyChanged = false
     @Published private(set) var lastSync: Date?
     @Published private(set) var isSyncing = false
     @Published private(set) var resolvingPorts = Set<Int>()
@@ -37,11 +38,23 @@ final class TunnelManager: ObservableObject {
     private var reconnectAttempt = 0
     private var isShuttingDown = false
 
-    init(preview: Bool = false, previewConnectionError: Bool = false) {
+    init(
+        preview: Bool = false,
+        previewConnectionError: Bool = false,
+        previewHostKeyChanged: Bool = false
+    ) {
         #if DEBUG
         if preview {
             loadPreviewState()
-            if previewConnectionError {
+            if previewHostKeyChanged {
+                state = .failed
+                services = []
+                activeCount = 0
+                conflictCount = 0
+                remoteCount = 0
+                hostKeyChanged = true
+                lastError = "Ключ SSH-сервера studio изменился. Это может быть ожидаемой заменой или признаком атаки. Автоматическое подключение остановлено. Сверь новый fingerprint с администратором перед продолжением."
+            } else if previewConnectionError {
                 state = .failed
                 services = []
                 activeCount = 0
@@ -269,6 +282,36 @@ final class TunnelManager: ObservableObject {
         conflictResolutionError = nil
     }
 
+    func removeStaleHostKeyAndReconnect() {
+        guard hostKeyChanged, !selectedHost.isEmpty, !isShuttingDown else { return }
+
+        let host = selectedHost
+        stopMonitoring()
+        state = .connecting
+        lastError = nil
+        hostKeyChanged = false
+
+        let generation = UUID()
+        connectionGeneration = generation
+        connectionTask = Task { [weak self] in
+            let error = await Task.detached {
+                SSHKnownHostsManager.removeStaleKey(host: host)
+            }.value
+
+            guard let self, connectionGeneration == generation else { return }
+            connectionTask = nil
+            connectionGeneration = nil
+            guard !Task.isCancelled, selectedHost == host, !isShuttingDown else { return }
+
+            if let error {
+                state = .failed
+                lastError = error
+                return
+            }
+            reconnect()
+        }
+    }
+
     private func beginMonitoring() {
         guard !selectedHost.isEmpty,
               !isShuttingDown,
@@ -298,6 +341,7 @@ final class TunnelManager: ObservableObject {
             guard let masterPID = preparation.pid else {
                 state = .failed
                 lastError = preparation.error ?? "Не удалось установить SSH-соединение"
+                hostKeyChanged = preparation.hostKeyChanged
                 if preparation.shouldRetryAutomatically {
                     scheduleReconnect(for: host)
                 }
@@ -305,6 +349,7 @@ final class TunnelManager: ObservableObject {
             }
 
             self.masterPID = masterPID
+            hostKeyChanged = false
             let monitor = RemoteInventoryMonitor(
                 host: host,
                 socketPath: TunnelEngine.socketPath(for: host)
@@ -328,6 +373,7 @@ final class TunnelManager: ObservableObject {
             } catch {
                 state = .failed
                 lastError = error.localizedDescription
+                hostKeyChanged = false
                 scheduleReconnect(for: host)
             }
         }
@@ -352,6 +398,7 @@ final class TunnelManager: ObservableObject {
         syncPending = false
         state = .failed
         lastError = error ?? "Соединение с удалённым монитором закрыто"
+        hostKeyChanged = false
         scheduleReconnect(for: host)
     }
 
@@ -450,6 +497,7 @@ final class TunnelManager: ObservableObject {
         conflictCount = result.conflicts.count
         remoteCount = result.remoteCount
         lastError = result.error
+        hostKeyChanged = result.hostKeyChanged
         lastSync = Date()
         persistStatus(result)
         scheduleDisappearanceSync()
@@ -541,6 +589,7 @@ final class TunnelManager: ObservableObject {
         conflictCount = 0
         remoteCount = 0
         lastError = nil
+        hostKeyChanged = false
         if !keepState {
             state = .disconnected
         }

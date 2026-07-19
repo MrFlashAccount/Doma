@@ -67,4 +67,6 @@ The remote watcher is an unprivileged shell helper streamed through Doma's exist
 
 Interactive secrets are passed directly from Doma's short-lived secure prompt to OpenSSH through the standard `SSH_ASKPASS` protocol. Doma does not store the password or add it to command-line arguments. Authentication failures stop automatic retries until you explicitly try again, preventing repeated password dialogs.
 
+If OpenSSH reports that a server host key changed, Doma stops reconnecting and warns that the change may be legitimate or an attack. You can explicitly remove only the matching stale entries from the configured user `known_hosts` files; `ssh-keygen` keeps backups, and the next connection still requires you to verify and confirm the new fingerprint.
+
 Updates are delivered through the official GitHub release feed and must pass Sparkle EdDSA verification before extraction.

@@ -76,7 +76,8 @@ enum TunnelEngine {
                 services: [],
                 remoteCount: 0,
                 error: preparation.error ?? "Не удалось установить SSH-соединение",
-                shouldRetryAutomatically: preparation.shouldRetryAutomatically
+                shouldRetryAutomatically: preparation.shouldRetryAutomatically,
+                hostKeyChanged: preparation.hostKeyChanged
             )
         }
 
@@ -92,7 +93,8 @@ enum TunnelEngine {
                 services: [],
                 remoteCount: 0,
                 error: error.isEmpty ? "Не удалось получить список портов" : error,
-                shouldRetryAutomatically: true
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false
             )
         }
 
@@ -164,7 +166,8 @@ enum TunnelEngine {
             services: services,
             remoteCount: remotePorts.count,
             error: nil,
-            shouldRetryAutomatically: true
+            shouldRetryAutomatically: true,
+            hostKeyChanged: false
         )
     }
 
@@ -177,14 +180,20 @@ enum TunnelEngine {
     private static func ensureMaster(host: String, socket: String) -> SSHMasterPreparation {
         if let pid = checkMaster(host: host, socket: socket) {
             DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
-            return SSHMasterPreparation(pid: pid, error: nil, shouldRetryAutomatically: true)
+            return SSHMasterPreparation(
+                pid: pid,
+                error: nil,
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false
+            )
         }
 
         guard DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil) else {
             return SSHMasterPreparation(
                 pid: nil,
                 error: "Не удалось завершить прежнее SSH-соединение для \(host).",
-                shouldRetryAutomatically: true
+                shouldRetryAutomatically: true,
+                hostKeyChanged: false
             )
         }
         cleanupSocket(socket)
@@ -211,21 +220,28 @@ enum TunnelEngine {
             return SSHMasterPreparation(
                 pid: nil,
                 error: details.message,
-                shouldRetryAutomatically: details.shouldRetryAutomatically
+                shouldRetryAutomatically: details.shouldRetryAutomatically,
+                hostKeyChanged: details.hostKeyChanged
             )
         }
 
         for _ in 0..<20 {
             if let pid = checkMaster(host: host, socket: socket) {
                 DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
-                return SSHMasterPreparation(pid: pid, error: nil, shouldRetryAutomatically: true)
+                return SSHMasterPreparation(
+                    pid: pid,
+                    error: nil,
+                    shouldRetryAutomatically: true,
+                    hostKeyChanged: false
+                )
             }
             Thread.sleep(forTimeInterval: 0.25)
         }
         return SSHMasterPreparation(
             pid: nil,
             error: "SSH подключился к \(host), но Doma не получила control socket.",
-            shouldRetryAutomatically: true
+            shouldRetryAutomatically: true,
+            hostKeyChanged: false
         )
     }
 

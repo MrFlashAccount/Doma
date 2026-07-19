@@ -99,12 +99,20 @@ struct CycleResult: Sendable {
     let remoteCount: Int
     let error: String?
     let shouldRetryAutomatically: Bool
+    let hostKeyChanged: Bool
 }
 
 struct SSHMasterPreparation: Sendable {
     let pid: Int?
     let error: String?
     let shouldRetryAutomatically: Bool
+    let hostKeyChanged: Bool
+}
+
+struct SSHConnectionErrorDetails: Sendable {
+    let message: String
+    let shouldRetryAutomatically: Bool
+    let hostKeyChanged: Bool
 }
 
 struct CommandResult: Sendable {

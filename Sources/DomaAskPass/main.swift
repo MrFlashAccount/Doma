@@ -28,7 +28,9 @@ guard alert.runModal() == .alertFirstButtonReturn else {
     exit(EXIT_FAILURE)
 }
 
-if let secret = secretField?.stringValue {
+if promptKind == "confirm" {
+    FileHandle.standardOutput.write(Data("yes\n".utf8))
+} else if let secret = secretField?.stringValue {
     FileHandle.standardOutput.write(Data((secret + "\n").utf8))
 }
 exit(EXIT_SUCCESS)

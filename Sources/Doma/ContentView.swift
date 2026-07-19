@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var collapsedGroups = Set<String>()
     @State private var conflictResolutionRequest: RemoteService?
     @State private var connectionErrorMessage: String?
+    @State private var staleHostKeyRemovalRequested = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,15 +36,33 @@ struct ContentView: View {
             "Не удалось подключиться к \(manager.selectedHost)",
             isPresented: connectionErrorBinding
         ) {
-            Button("Повторить") {
-                connectionErrorMessage = nil
-                manager.reconnect()
+            if manager.hostKeyChanged {
+                Button("Забыть старый ключ…") {
+                    connectionErrorMessage = nil
+                    staleHostKeyRemovalRequested = true
+                }
+            } else {
+                Button("Повторить") {
+                    connectionErrorMessage = nil
+                    manager.reconnect()
+                }
             }
             Button("Закрыть", role: .cancel) {
                 connectionErrorMessage = nil
             }
         } message: {
             Text(connectionErrorMessage ?? "Неизвестная ошибка SSH")
+        }
+        .alert(
+            "Забыть старый ключ \(manager.selectedHost)?",
+            isPresented: $staleHostKeyRemovalRequested
+        ) {
+            Button("Удалить и переподключиться", role: .destructive) {
+                manager.removeStaleHostKeyAndReconnect()
+            }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Doma удалит прежние записи только для этого адреса из пользовательских known_hosts и сохранит резервные копии. Новый ключ не будет принят автоматически: SSH снова покажет fingerprint. Если смена неожиданна, сначала сверь его с администратором.")
         }
         .alert(
             "Не удалось изменить автозапуск",
