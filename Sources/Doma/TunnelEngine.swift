@@ -7,8 +7,10 @@ enum TunnelEngine {
     private static let forwardLimit = 128
     static let disappearGrace: TimeInterval = 10
     static let inventoryScript = #"""
+    printf '__USER__\n'
+    id -u
     printf '__SS__\n'
-    ss_output=$(ss -H -ltnp 2>&1)
+    ss_output=$(ss -H -ltnpe 2>&1)
     ss_status=$?
     if [ "$ss_status" -ne 0 ]; then
       printf '__DOMA_SOCKET_SCAN_FAILED__ %s\n' "$ss_output" >&2
@@ -17,7 +19,7 @@ enum TunnelEngine {
     printf '%s\n' "$ss_output"
     printf '__DOCKER__\n'
     if command -v docker >/dev/null 2>&1; then
-      docker_output=$(docker ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}' 2>&1)
+      docker_output=$(docker ps --format '{{.Names}}|{{.Image}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}' 2>&1)
       if [ "$?" -eq 0 ]; then
         printf '%s\n' "$docker_output"
       else
@@ -25,37 +27,19 @@ enum TunnelEngine {
       fi
     fi
     printf '__PS__\n'
-    ps_output=$(ps -eo pid=,comm=,args= 2>&1)
+    ps_output=$(ps -eo pid=,ppid=,uid=,user=,comm=,args= 2>&1)
     if [ "$?" -eq 0 ]; then
       printf '%s\n' "$ps_output"
     else
       printf '__DOMA_WARNING_PROCESSES__\n'
     fi
     printf '__CWD__\n'
-    for link in /proc/[0-9]*/cwd; do
-      pid=${link#/proc/}
-      pid=${pid%/cwd}
-      cwd=$(readlink "$link" 2>/dev/null) || continue
+    printf '%s\n' "$ss_output" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u | while read -r pid; do
+      cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+      [ -n "$cwd" ] || continue
       printf '%s|%s\n' "$pid" "$cwd"
     done
     """#
-
-    private struct RawListener {
-        let port: Int
-        let pid: Int?
-        let command: String?
-    }
-
-    private struct DockerInfo {
-        let container: String
-        let project: String
-        let service: String
-    }
-
-    private struct ProcessInfo {
-        let command: String
-        let arguments: String
-    }
 
     static func socketPath(for host: String) -> String {
         let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -193,7 +177,7 @@ enum TunnelEngine {
             )
         }
 
-        let inventory = parseInventory(inventoryResult.stdout)
+        let inventory = RemoteInventoryParser.parse(inventoryResult.stdout)
         guard inventory.sawSocketSection else {
             return CycleResult(
                 state: .failed,
@@ -210,7 +194,7 @@ enum TunnelEngine {
                 forwardingStateIsAuthoritative: false
             )
         }
-        let remotePorts = Set(inventory.listeners.map(\.port).filter { 1024...32767 ~= $0 })
+        let remotePorts = eligibleRemotePorts(in: inventory)
         let localSnapshot = await LocalProcessController.snapshot()
         if Task.isCancelled {
             return cancelledCycleResult(input)
@@ -473,7 +457,10 @@ enum TunnelEngine {
             timeout: 5
         )
         guard result.status == 0 else { return nil }
-        return firstCapture(in: result.stdout + result.stderr, pattern: #"pid=(\d+)"#).flatMap(Int.init)
+        return RemoteTextMatching.firstCapture(
+            in: result.stdout + result.stderr,
+            pattern: #"pid=(\d+)"#
+        ).flatMap(Int.init)
     }
 
     private static func checkMasterSynchronously(host: String, socket: String) -> Int? {
@@ -483,7 +470,10 @@ enum TunnelEngine {
             timeout: 2
         )
         guard result.status == 0 else { return nil }
-        return firstCapture(in: result.stdout + result.stderr, pattern: #"pid=(\d+)"#).flatMap(Int.init)
+        return RemoteTextMatching.firstCapture(
+            in: result.stdout + result.stderr,
+            pattern: #"pid=(\d+)"#
+        ).flatMap(Int.init)
     }
 
     private static func cleanupSocket(_ socket: String) {
@@ -583,209 +573,51 @@ enum TunnelEngine {
         return warning.isEmpty ? nil : warning
     }
 
-    private struct Inventory {
-        var listeners: [RawListener] = []
-        var dockerByPort: [Int: DockerInfo] = [:]
-        var processes: [Int: ProcessInfo] = [:]
-        var cwdByPID: [Int: String] = [:]
-        var warnings = Set<InventoryWarning>()
-        var sawSocketSection = false
-        var sawProcessSection = false
-
-        var warningMessage: String? {
-            let messages = warnings.sorted { $0.rawValue < $1.rawValue }.map(\.message)
-            return messages.isEmpty ? nil : messages.joined(separator: " ")
-        }
-    }
-
-    private enum InventoryWarning: String {
-        case docker
-        case partialProcesses
-        case partialSockets
-        case processes
-        case protocolSections
-
-        var message: String {
-            switch self {
-            case .docker:
-                "Метаданные Docker недоступны; порты продолжают пробрасываться как TCP."
-            case .processes:
-                "Метаданные процессов недоступны; порты продолжают пробрасываться как TCP."
-            case .partialSockets:
-                "Часть listening sockets пришла без PID/имени процесса; TCP-пробросы продолжают работать."
-            case .partialProcesses:
-                "Часть процессов не сопоставилась с listening sockets; TCP-пробросы продолжают работать."
-            case .protocolSections:
-                "Удалённый inventory вернул неполный набор секций; доступные TCP-порты продолжают пробрасываться."
-            }
-        }
-    }
-
-    private static func parseInventory(_ output: String) -> Inventory {
-        enum Section { case none, ss, docker, ps, cwd }
-        var section = Section.none
-        var inventory = Inventory()
-
-        for line in output.split(whereSeparator: \.isNewline).map(String.init) {
-            if line == "__DOMA_WARNING_DOCKER__" {
-                inventory.warnings.insert(.docker)
-                continue
-            }
-            if line == "__DOMA_WARNING_PROCESSES__" {
-                inventory.warnings.insert(.processes)
-                continue
-            }
-
-            switch line {
-            case "__SS__":
-                inventory.sawSocketSection = true
-                section = .ss
-            case "__DOCKER__": section = .docker
-            case "__PS__":
-                inventory.sawProcessSection = true
-                section = .ps
-            case "__CWD__": section = .cwd
-            default:
-                switch section {
-                case .ss:
-                    let fields = line.split(whereSeparator: \.isWhitespace).map(String.init)
-                    guard fields.count >= 4,
-                          let port = firstCapture(in: fields[3], pattern: #":(\d+)$"#).flatMap(Int.init)
-                    else { continue }
-                    let pid = firstCapture(in: line, pattern: #"pid=(\d+)"#).flatMap(Int.init)
-                    let command = firstCapture(in: line, pattern: #"\(\(\"([^\"]+)\""#)
-                    inventory.listeners.append(RawListener(port: port, pid: pid, command: command))
-                case .docker:
-                    let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-                    guard fields.count >= 4 else { continue }
-                    let info = DockerInfo(container: fields[0], project: fields[2], service: fields[3])
-                    for port in captures(in: fields[1], pattern: #"(?:^|,\s)(?:[^,]*:)?(\d+)->\d+/tcp"#).compactMap(Int.init) {
-                        inventory.dockerByPort[port] = info
-                    }
-                case .ps:
-                    guard let groups = captureGroups(in: line, pattern: #"^\s*(\d+)\s+(\S+)\s+(.*)$"#),
-                          let pid = Int(groups[0])
-                    else { continue }
-                    inventory.processes[pid] = ProcessInfo(command: groups[1], arguments: groups[2])
-                case .cwd:
-                    let fields = line.split(separator: "|", maxSplits: 1).map(String.init)
-                    if fields.count == 2, let pid = Int(fields[0]) {
-                        inventory.cwdByPID[pid] = fields[1]
-                    }
-                case .none:
-                    break
-                }
-            }
-        }
-        if !inventory.sawProcessSection {
-            inventory.warnings.insert(.protocolSections)
-        }
-        let hasAnySocketProcessMetadata = inventory.listeners.contains {
-            $0.pid != nil || $0.command != nil
-        }
-        if hasAnySocketProcessMetadata,
-           inventory.listeners.contains(where: { $0.pid == nil || $0.command == nil })
-        {
-            inventory.warnings.insert(.partialSockets)
-        }
-        let listenerPIDs = Set(inventory.listeners.compactMap(\.pid))
-        let missingProcessCount = listenerPIDs.subtracting(inventory.processes.keys).count
-        if missingProcessCount >= max(1, listenerPIDs.count / 2), !listenerPIDs.isEmpty {
-            inventory.warnings.insert(.partialProcesses)
-        }
-        return inventory
-    }
-
     static func inventoryWarning(in output: String) -> String? {
-        parseInventory(output).warningMessage
+        RemoteInventoryParser.parse(output).warningMessage
     }
 
     static func hasMandatorySocketSection(in output: String) -> Bool {
-        parseInventory(output).sawSocketSection
+        RemoteInventoryParser.parse(output).sawSocketSection
+    }
+
+    private static func eligibleRemotePorts(in inventory: RemoteInventory) -> Set<Int> {
+        RemoteServiceRecognitionPipeline(inventory: inventory).eligiblePorts
+    }
+
+    static func services(fromInventoryOutput output: String, activePorts: Set<Int> = []) -> [RemoteService] {
+        let inventory = RemoteInventoryParser.parse(output)
+        return makeServices(
+            inventory: inventory,
+            remotePorts: eligibleRemotePorts(in: inventory),
+            active: activePorts,
+            conflicts: [],
+            localListeners: [:]
+        )
     }
 
     private static func makeServices(
-        inventory: Inventory,
+        inventory: RemoteInventory,
         remotePorts: Set<Int>,
         active: Set<Int>,
         conflicts: Set<Int>,
         localListeners: [Int: LocalListenerInfo]
     ) -> [RemoteService] {
-        let listenerByPort = Dictionary(inventory.listeners.map { ($0.port, $0) }, uniquingKeysWith: { first, _ in first })
+        let pipeline = RemoteServiceRecognitionPipeline(inventory: inventory)
 
         return remotePorts.sorted().map { port in
-            let listener = listenerByPort[port]
-            let process = listener?.pid.flatMap { inventory.processes[$0] }
-            let cwd = listener?.pid.flatMap { inventory.cwdByPID[$0] }
-
-            let kind: ServiceKind
-            let group: String
-            let name: String
-            let details: String
-
-            if let docker = inventory.dockerByPort[port] {
-                kind = .docker
-                group = docker.project.isEmpty ? "Docker" : docker.project
-                name = docker.service.isEmpty ? docker.container : docker.service
-                details = docker.container
-            } else {
-                let arguments = process?.arguments ?? ""
-                let executable = (process?.command ?? listener?.command ?? "TCP").lowercased()
-                if arguments.lowercased().contains("vite") {
-                    kind = .vite
-                    group = cwd ?? "Vite"
-                    name = "Vite"
-                } else if executable.contains("node") {
-                    kind = .node
-                    group = cwd ?? "Node"
-                    name = "Node"
-                } else if executable.contains("python") {
-                    kind = .python
-                    group = cwd ?? "Python"
-                    name = "Python"
-                } else {
-                    kind = .system
-                    group = "Другие сервисы"
-                    name = process?.command ?? listener?.command ?? "TCP"
-                }
-                details = arguments.isEmpty ? (cwd ?? "") : arguments
-            }
+            let recognized = pipeline.recognize(port: port)
 
             return RemoteService(
                 port: port,
-                name: name,
-                group: group,
-                kind: kind,
-                details: details,
+                name: recognized.name,
+                group: recognized.group,
+                kind: recognized.kind,
+                details: recognized.details,
                 isForwarded: active.contains(port),
                 hasConflict: conflicts.contains(port),
                 conflictOwners: conflicts.contains(port) ? (localListeners[port]?.owners ?? []) : []
             )
         }
     }
-
-    private static func firstCapture(in text: String, pattern: String) -> String? {
-        captureGroups(in: text, pattern: pattern)?.first
-    }
-
-    private static func captures(in text: String, pattern: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.matches(in: text, range: range).compactMap { match in
-            guard match.numberOfRanges > 1, let capture = Range(match.range(at: 1), in: text) else { return nil }
-            return String(text[capture])
-        }
-    }
-
-    private static func captureGroups(in text: String, pattern: String) -> [String]? {
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text))
-        else { return nil }
-
-        return (1..<match.numberOfRanges).compactMap { index in
-            guard let range = Range(match.range(at: index), in: text) else { return nil }
-            return String(text[range])
-        }
-    }
-
 }

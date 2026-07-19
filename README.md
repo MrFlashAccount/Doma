@@ -20,7 +20,7 @@
 
 ## The same port, locally
 
-Start Docker, Vite, Node, Python, or any other TCP service on your remote machine. A moment later, open the same port on your Mac:
+Start Docker, Minikube, Vite, Bun, Node, Python, zrok, or any other TCP service on your remote machine. A moment later, open the same port on your Mac:
 
 ```text
 remote :12000  →  http://127.0.0.1:12000
@@ -30,7 +30,7 @@ There is no new `ssh -L` command and no tunnel restart. When the service disappe
 
 ## Everything in one menu
 
-- **See what is actually running.** Doma names Docker Compose services and recognizes Vite, Node, and Python processes.
+- **See what is actually running.** Doma names Docker Compose and Minikube services; recognizes Vite, Bun/Node, Python, zrok, and generic user processes; and separates system-owned services.
 - **Keep large stacks readable.** Services are grouped into collapsible projects instead of becoming one long port list.
 - **Open a service with one click.** Select any forwarded service to open its local URL in your browser.
 - **Notice problems immediately.** Local port conflicts are shown separately instead of failing silently.
@@ -61,9 +61,9 @@ To start Doma when you sign in, open its ellipsis menu and enable **Запуск
 
 Doma binds forwards only to `127.0.0.1`, never `0.0.0.0`. It reads the concrete hosts from your existing SSH config and maintains its own ControlMaster, so ordinary interactive SSH sessions stay independent.
 
-It watches listening TCP ports in the `1024–32767` range and keeps up to 128 active forwards. A port already occupied on your Mac is reported as a conflict and is never taken over.
+It watches listening TCP ports in the `1024–65535` range, forwards the normal `1024–32767` service range plus explicitly identified Minikube mappings, and keeps up to 128 active forwards. Unrelated high ephemeral ports stay hidden. A port already occupied on your Mac is reported as a conflict and is never taken over.
 
-The remote watcher is an unprivileged shell helper streamed through Doma's existing SSH ControlMaster. It hashes only the listening-socket table once per second and writes to the channel when that signature changes. Doma then performs one full inventory refresh and reconciles forwards. A five-minute full refresh repairs any missed event; temporary conflicts and disappearing listeners have their own bounded retries. Nothing is installed or left running on the remote host after the channel closes.
+The remote watcher and full inventory are unprivileged shell helpers streamed through Doma's existing SSH ControlMaster. Doma never invokes `sudo`. The watcher hashes only the listening-socket table once per second and writes to the channel when that signature changes. Doma then performs one full inventory refresh and reconciles forwards. Process recognition combines the socket UID with ordinary `ps`, Docker, and conservative command-line/parent-process matching; if the remote kernel hides an exact PID mapping, Doma keeps the service generic instead of escalating privileges or guessing. A five-minute full refresh repairs any missed event; temporary conflicts and disappearing listeners have their own bounded retries. Nothing is installed or left running on the remote host after the channel closes.
 
 Doma's local cache contains a minimal `status.json` schema v2 with aggregate counts, connection state, and a degraded flag. Schema v2 is a breaking replacement for the earlier detailed status format: it deliberately omits host aliases, port lists, process arguments, paths, and raw diagnostics. Existing readers must update for v2; Doma overwrites an old file with v2 on a successful sync and removes it on disconnect, failure, host switch, or quit.
 

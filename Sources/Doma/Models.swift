@@ -27,28 +27,37 @@ enum ConnectionState: String, Sendable {
 
 enum ServiceKind: String, Sendable {
     case docker
+    case minikube
     case vite
     case node
     case python
+    case zrok
+    case process
     case system
 
     var title: String {
         switch self {
         case .docker: "Docker"
+        case .minikube: "Minikube"
         case .vite: "Vite"
-        case .node: "Node"
+        case .node: "Bun / Node"
         case .python: "Python"
-        case .system: "TCP"
+        case .zrok: "zrok"
+        case .process: "Процесс"
+        case .system: "Системный сервис"
         }
     }
 
     var symbol: String {
         switch self {
         case .docker: "shippingbox.fill"
+        case .minikube: "hexagon.fill"
         case .vite: "bolt.fill"
         case .node: "server.rack"
         case .python: "chevron.left.forwardslash.chevron.right"
-        case .system: "point.3.connected.trianglepath.dotted"
+        case .zrok: "globe"
+        case .process: "terminal.fill"
+        case .system: "gearshape.2.fill"
         }
     }
 }
