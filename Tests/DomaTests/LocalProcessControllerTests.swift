@@ -2,6 +2,67 @@
 import XCTest
 
 final class LocalProcessControllerTests: XCTestCase {
+    func testMasterRegistryCommandFailureIsNonAuthoritative() {
+        let masters = DomaSSHMasterRegistry.snapshot(
+            from: CommandResult(status: 124, stdout: "", stderr: ""),
+            controlDirectory: "/Users/test/Library/Caches/Doma/cm"
+        )
+
+        XCTAssertFalse(masters.isAuthoritative)
+        XCTAssertTrue(masters.masters.isEmpty)
+        XCTAssertTrue(masters.warning?.contains("ps не ответила") == true)
+    }
+
+    func testMasterRegistryFailureDegradesOtherwiseValidLsofSnapshot() {
+        let masters = DomaSSHMasterRegistry.snapshot(
+            from: CommandResult(status: 127, stdout: "", stderr: "ps unavailable"),
+            controlDirectory: "/Users/test/Library/Caches/Doma/cm"
+        )
+        let local = LocalProcessController.snapshot(
+            from: CommandResult(
+                status: 0,
+                stdout: "p123\ncvite\nu501\nn127.0.0.1:3000\n",
+                stderr: ""
+            ),
+            masterSnapshot: masters
+        )
+
+        XCTAssertFalse(local.isAuthoritative)
+        XCTAssertNotNil(local.listeners[3000])
+        XCTAssertTrue(local.warning?.contains("ControlMaster") == true)
+    }
+
+    func testLsofNoMatchStatusIsAuthoritativeEmptySnapshot() {
+        let snapshot = LocalProcessController.snapshot(
+            from: CommandResult(status: 1, stdout: "", stderr: "")
+        )
+
+        XCTAssertTrue(snapshot.isAuthoritative)
+        XCTAssertTrue(snapshot.listeners.isEmpty)
+        XCTAssertNil(snapshot.warning)
+    }
+
+    func testLsofFailureIsActionableAndNonAuthoritative() {
+        let snapshot = LocalProcessController.snapshot(
+            from: CommandResult(status: 124, stdout: "", stderr: "")
+        )
+
+        XCTAssertFalse(snapshot.isAuthoritative)
+        XCTAssertTrue(snapshot.listeners.isEmpty)
+        XCTAssertTrue(snapshot.warning?.contains("не ответила вовремя") == true)
+        XCTAssertTrue(snapshot.warning?.contains("не изменено") == true)
+    }
+
+    func testPartialSuccessfulLsofMetadataProducesWarning() {
+        let snapshot = LocalProcessController.snapshot(
+            from: CommandResult(status: 0, stdout: "p123\nn127.0.0.1:3000\n", stderr: "")
+        )
+
+        XCTAssertTrue(snapshot.isAuthoritative)
+        XCTAssertFalse(try XCTUnwrap(snapshot.listeners[3000]?.owners.first).canTerminate)
+        XCTAssertTrue(snapshot.warning?.contains("неполные данные") == true)
+    }
+
     func testParseListenersGroupsOwnersAndProtectsUnsafeProcesses() throws {
         let output = """
         p123

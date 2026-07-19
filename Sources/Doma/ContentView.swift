@@ -9,6 +9,8 @@ struct ContentView: View {
     @State private var hoveredPort: Int?
     @State private var collapsedGroups = Set<String>()
     @State private var conflictResolutionRequest: RemoteService?
+    @State private var connectionErrorMessage: String?
+    @State private var staleHostKeyRemovalRequested = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,6 +24,45 @@ struct ContentView: View {
         .onAppear {
             launchAtLogin.refresh()
             updates.checkForUpdatesSilentlyIfNeeded()
+            if manager.state == .failed, let error = manager.lastError {
+                connectionErrorMessage = error
+            }
+        }
+        .onChange(of: manager.lastError) { _, error in
+            guard manager.state == .failed, let error else { return }
+            connectionErrorMessage = error
+        }
+        .alert(
+            "Не удалось подключиться к \(manager.selectedHost)",
+            isPresented: connectionErrorBinding
+        ) {
+            if manager.hostKeyChanged {
+                Button("Забыть старый ключ…") {
+                    connectionErrorMessage = nil
+                    staleHostKeyRemovalRequested = true
+                }
+            } else {
+                Button("Повторить") {
+                    connectionErrorMessage = nil
+                    manager.reconnect()
+                }
+            }
+            Button("Закрыть", role: .cancel) {
+                connectionErrorMessage = nil
+            }
+        } message: {
+            Text(connectionErrorMessage ?? "Неизвестная ошибка SSH")
+        }
+        .alert(
+            "Забыть старый ключ \(manager.selectedHost)?",
+            isPresented: $staleHostKeyRemovalRequested
+        ) {
+            Button("Удалить и переподключиться", role: .destructive) {
+                manager.removeStaleHostKeyAndReconnect()
+            }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Doma сначала сохранит уникальные резервные копии всех затронутых пользовательских known_hosts, затем удалит прежние записи только для этого адреса. Для каждого файла сохраняются три последние успешные копии. При частичной ошибке Doma атомарно заменит каждый восстанавливаемый файл и постарается восстановить весь набор; общей атомарности между файлами нет. Незавершённая операция будет восстановлена при следующем запуске. Новый ключ не будет принят автоматически даже при accept-new/no в SSH config: SSH снова покажет fingerprint. Если смена неожиданна, сначала сверь его с администратором.")
         }
         .alert(
             "Не удалось изменить автозапуск",
@@ -70,7 +111,7 @@ struct ContentView: View {
                 hostMenu
                 Text(connectionSummary)
                     .font(.caption)
-                    .foregroundStyle(manager.lastError == nil ? Color.secondary : Color.red)
+                    .foregroundStyle(connectionSummaryColor)
                     .lineLimit(1)
             }
 
@@ -237,7 +278,7 @@ struct ContentView: View {
                     } else if updates.isCheckingForUpdates {
                         Label("Проверяем обновления…", systemImage: "arrow.triangle.2.circlepath")
                     } else {
-                        Label("Проверить обновления…", systemImage: "arrow.down.circle")
+                        Text("Проверить обновления…")
                     }
                 }
                 .disabled(!updates.canCheckForUpdates || updates.isCheckingForUpdates)
@@ -490,6 +531,17 @@ struct ContentView: View {
         )
     }
 
+    private var connectionErrorBinding: Binding<Bool> {
+        Binding(
+            get: { connectionErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    connectionErrorMessage = nil
+                }
+            }
+        )
+    }
+
     private func isGroupExpanded(_ group: String) -> Bool {
         !collapsedGroups.contains(group) || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -497,6 +549,9 @@ struct ContentView: View {
     private var connectionSummary: String {
         if let error = manager.lastError {
             return error
+        }
+        if let warning = manager.lastWarning {
+            return warning
         }
         switch manager.state {
         case .connected:
@@ -508,6 +563,12 @@ struct ContentView: View {
         case .disconnected:
             return "Не подключено"
         }
+    }
+
+    private var connectionSummaryColor: Color {
+        if manager.lastError != nil { return .red }
+        if manager.lastWarning != nil { return .orange }
+        return .secondary
     }
 
     private var emptyStateDescription: String {
