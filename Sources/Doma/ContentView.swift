@@ -7,6 +7,7 @@ struct ContentView: View {
 
     @State private var query = ""
     @State private var hoveredPort: Int?
+    @State private var isHostMenuHovered = false
     @State private var collapsedGroups = Set<String>()
     @State private var conflictResolutionRequest: RemoteService?
     @State private var connectionErrorMessage: String?
@@ -113,6 +114,8 @@ struct ContentView: View {
                     .font(.caption)
                     .foregroundStyle(connectionSummaryColor)
                     .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(connectionSummary)
             }
 
             Spacer(minLength: 12)
@@ -158,12 +161,30 @@ struct ContentView: View {
                 Label("Обновить список", systemImage: "arrow.clockwise")
             }
         } label: {
-            Text(manager.selectedHost.isEmpty ? "SSH сервер" : manager.selectedHost)
-                .font(.system(size: 14, weight: .semibold))
+            HStack(spacing: 5) {
+                Text(manager.selectedHost.isEmpty ? "SSH сервер" : manager.selectedHost)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.trailing, 6)
+            .frame(height: 24)
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(isHostMenuHovered ? Color.primary.opacity(0.07) : .clear)
+            }
         }
-        .controlSize(.small)
-        .domaGlassButtonStyle()
+        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
         .fixedSize()
+        .onHover { isHovering in
+            isHostMenuHovered = isHovering
+        }
+        .animation(.easeOut(duration: 0.12), value: isHostMenuHovered)
         .accessibilityLabel("SSH сервер: \(manager.selectedHost)")
     }
 
