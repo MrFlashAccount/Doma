@@ -249,15 +249,20 @@ struct ContentView: View {
                     }
                 }
 
-                if let version = updates.availableVersion {
-                    Divider()
+                Divider()
 
-                    Button {
-                        updates.performPrimaryAction()
-                    } label: {
-                        Text("Обновить \(version)…")
+                Button {
+                    updates.performPrimaryAction()
+                } label: {
+                    if let version = updates.availableVersion {
+                        Label("Обновить \(version)…", systemImage: "arrow.down.circle.fill")
+                    } else if updates.isCheckingForUpdates {
+                        Label("Проверяем обновления…", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Text("Проверить обновления…")
                     }
                 }
+                .disabled(!updates.canCheckForUpdates || updates.isCheckingForUpdates)
 
                 Divider()
 

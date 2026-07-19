@@ -25,13 +25,26 @@ final class UpdaterConfigurationTests: XCTestCase {
         )
     }
 
+    func testManualUpdateCheckKeepsActionWithoutIcon() throws {
+        let contentView = try String(
+            contentsOf: repositoryRoot.appendingPathComponent("Sources/Doma/ContentView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(contentView.contains("Text(\"Проверить обновления…\")"))
+        XCTAssertFalse(contentView.contains("Label(\"Проверить обновления…\""))
+    }
+
     private func loadInfoPlist() throws -> [String: Any] {
-        let repositoryRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
         let data = try Data(contentsOf: repositoryRoot.appendingPathComponent("Resources/Info.plist"))
         let plist = try PropertyListSerialization.propertyList(from: data, format: nil)
         return try XCTUnwrap(plist as? [String: Any])
+    }
+
+    private var repositoryRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 }
