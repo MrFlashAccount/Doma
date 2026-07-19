@@ -27,10 +27,20 @@ struct RemoteMonitorOutputParser {
 
 final class RemoteInventoryMonitor: @unchecked Sendable {
     static let watcherScript = #"""
-    if [ ! -r /proc/net/tcp ]; then
-      printf '/proc/net/tcp is unavailable on the remote host\n' >&2
+    if [ ! -e /proc/net/tcp ]; then
+      printf '__DOMA_DEPENDENCY_MISSING__ /proc/net/tcp is unavailable\n' >&2
       exit 127
     fi
+    if [ ! -r /proc/net/tcp ]; then
+      printf '__DOMA_PERMISSION_DENIED__ cannot read /proc/net/tcp\n' >&2
+      exit 77
+    fi
+    for tool in awk sort cksum sleep; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        printf '__DOMA_DEPENDENCY_MISSING__ %s is unavailable\n' "$tool" >&2
+        exit 127
+      fi
+    done
 
     doma_listener_signature() {
       awk '$4 == "0A" {
@@ -68,7 +78,7 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
     private var stderr = Data()
     private var stopping = false
     private var onChange: (@Sendable () -> Void)?
-    private var onTermination: (@Sendable (String?) -> Void)?
+    private var onTermination: (@Sendable (RemoteMonitorTermination) -> Void)?
 
     init(host: String, socketPath: String) {
         self.host = host
@@ -77,7 +87,7 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
 
     func start(
         onChange: @escaping @Sendable () -> Void,
-        onTermination: @escaping @Sendable (String?) -> Void
+        onTermination: @escaping @Sendable (RemoteMonitorTermination) -> Void
     ) throws {
         let process = Process()
         let output = Pipe()
@@ -183,15 +193,16 @@ final class RemoteInventoryMonitor: @unchecked Sendable {
             output = nil
             errors = nil
 
-            let message = String(data: stderr, encoding: .utf8)?
-                .split(whereSeparator: \.isNewline)
-                .last
-                .map(String.init)
-            let fallback = status == 0 ? nil : "Remote monitor exited with status \(status)"
+            let errorOutput = String(data: stderr, encoding: .utf8) ?? ""
+            let termination = RemoteAccessErrorFormatter.monitorTermination(
+                host: host,
+                status: status,
+                stderr: errorOutput
+            )
             let callback = onTermination
             onChange = nil
             onTermination = nil
-            callback?(message ?? fallback)
+            callback?(termination)
         }
     }
 }

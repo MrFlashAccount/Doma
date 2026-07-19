@@ -98,6 +98,7 @@ struct CycleResult: Sendable {
     let services: [RemoteService]
     let remoteCount: Int
     let error: String?
+    let warning: String?
     let shouldRetryAutomatically: Bool
     let hostKeyChanged: Bool
 }
@@ -113,6 +114,16 @@ struct SSHConnectionErrorDetails: Sendable {
     let message: String
     let shouldRetryAutomatically: Bool
     let hostKeyChanged: Bool
+}
+
+struct RemoteAccessErrorDetails: Sendable {
+    let message: String
+    let shouldRetryAutomatically: Bool
+}
+
+struct RemoteMonitorTermination: Sendable {
+    let message: String?
+    let shouldRetryAutomatically: Bool
 }
 
 struct CommandResult: Sendable {

@@ -5,6 +5,39 @@ enum TunnelEngine {
     private static let bindAddress = "127.0.0.1"
     private static let forwardLimit = 128
     static let disappearGrace: TimeInterval = 10
+    static let inventoryScript = #"""
+    printf '__SS__\n'
+    ss_output=$(ss -H -ltnp 2>&1)
+    ss_status=$?
+    if [ "$ss_status" -ne 0 ]; then
+      printf '__DOMA_SOCKET_SCAN_FAILED__ %s\n' "$ss_output" >&2
+      exit "$ss_status"
+    fi
+    printf '%s\n' "$ss_output"
+    printf '__DOCKER__\n'
+    if command -v docker >/dev/null 2>&1; then
+      docker_output=$(docker ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}' 2>&1)
+      if [ "$?" -eq 0 ]; then
+        printf '%s\n' "$docker_output"
+      else
+        printf '__DOMA_WARNING_DOCKER__\n'
+      fi
+    fi
+    printf '__PS__\n'
+    ps_output=$(ps -eo pid=,comm=,args= 2>&1)
+    if [ "$?" -eq 0 ]; then
+      printf '%s\n' "$ps_output"
+    else
+      printf '__DOMA_WARNING_PROCESSES__\n'
+    fi
+    printf '__CWD__\n'
+    for link in /proc/[0-9]*/cwd; do
+      pid=${link#/proc/}
+      pid=${pid%/cwd}
+      cwd=$(readlink "$link" 2>/dev/null) || continue
+      printf '%s|%s\n' "$pid" "$cwd"
+    done
+    """#
 
     private struct RawListener {
         let port: Int
@@ -76,6 +109,7 @@ enum TunnelEngine {
                 services: [],
                 remoteCount: 0,
                 error: preparation.error ?? "Не удалось установить SSH-соединение",
+                warning: nil,
                 shouldRetryAutomatically: preparation.shouldRetryAutomatically,
                 hostKeyChanged: preparation.hostKeyChanged
             )
@@ -83,7 +117,10 @@ enum TunnelEngine {
 
         let inventoryResult = queryInventory(host: input.host, socket: socket)
         guard inventoryResult.status == 0 else {
-            let error = lastLine(inventoryResult.stderr.isEmpty ? inventoryResult.stdout : inventoryResult.stderr)
+            let details = RemoteAccessErrorFormatter.inventoryDetails(
+                host: input.host,
+                result: inventoryResult
+            )
             return CycleResult(
                 state: .failed,
                 masterPID: masterPID,
@@ -92,8 +129,9 @@ enum TunnelEngine {
                 missingSince: input.missingSince,
                 services: [],
                 remoteCount: 0,
-                error: error.isEmpty ? "Не удалось получить список портов" : error,
-                shouldRetryAutomatically: true,
+                error: details.message,
+                warning: nil,
+                shouldRetryAutomatically: details.shouldRetryAutomatically,
                 hostKeyChanged: false
             )
         }
@@ -166,6 +204,7 @@ enum TunnelEngine {
             services: services,
             remoteCount: remotePorts.count,
             error: nil,
+            warning: inventory.warningMessage,
             shouldRetryAutomatically: true,
             hostKeyChanged: false
         )
@@ -281,24 +320,6 @@ enum TunnelEngine {
     }
 
     private static func queryInventory(host: String, socket: String) -> CommandResult {
-        let script = #"""
-        printf '__SS__\n'
-        ss -H -ltnp 2>/dev/null
-        printf '__DOCKER__\n'
-        if command -v docker >/dev/null 2>&1; then
-          docker ps --format '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}' 2>/dev/null
-        fi
-        printf '__PS__\n'
-        ps -eo pid=,comm=,args= 2>/dev/null
-        printf '__CWD__\n'
-        for link in /proc/[0-9]*/cwd; do
-          pid=${link#/proc/}
-          pid=${pid%/cwd}
-          cwd=$(readlink "$link" 2>/dev/null) || continue
-          printf '%s|%s\n' "$pid" "$cwd"
-        done
-        """#
-
         return CommandRunner.run(
             ssh,
             arguments: [
@@ -308,7 +329,7 @@ enum TunnelEngine {
                 host,
                 "--", "sh", "-s",
             ],
-            stdin: script,
+            stdin: inventoryScript,
             timeout: 10
         )
     }
@@ -325,6 +346,26 @@ enum TunnelEngine {
         var dockerByPort: [Int: DockerInfo] = [:]
         var processes: [Int: ProcessInfo] = [:]
         var cwdByPID: [Int: String] = [:]
+        var warnings = Set<InventoryWarning>()
+
+        var warningMessage: String? {
+            let messages = warnings.sorted { $0.rawValue < $1.rawValue }.map(\.message)
+            return messages.isEmpty ? nil : messages.joined(separator: " ")
+        }
+    }
+
+    private enum InventoryWarning: String {
+        case docker
+        case processes
+
+        var message: String {
+            switch self {
+            case .docker:
+                "Метаданные Docker недоступны; порты продолжают пробрасываться как TCP."
+            case .processes:
+                "Метаданные процессов недоступны; порты продолжают пробрасываться как TCP."
+            }
+        }
     }
 
     private static func parseInventory(_ output: String) -> Inventory {
@@ -333,6 +374,15 @@ enum TunnelEngine {
         var inventory = Inventory()
 
         for line in output.split(whereSeparator: \.isNewline).map(String.init) {
+            if line == "__DOMA_WARNING_DOCKER__" {
+                inventory.warnings.insert(.docker)
+                continue
+            }
+            if line == "__DOMA_WARNING_PROCESSES__" {
+                inventory.warnings.insert(.processes)
+                continue
+            }
+
             switch line {
             case "__SS__": section = .ss
             case "__DOCKER__": section = .docker
@@ -371,6 +421,10 @@ enum TunnelEngine {
             }
         }
         return inventory
+    }
+
+    static func inventoryWarning(in output: String) -> String? {
+        parseInventory(output).warningMessage
     }
 
     private static func makeServices(
@@ -457,7 +511,4 @@ enum TunnelEngine {
         }
     }
 
-    private static func lastLine(_ text: String) -> String {
-        text.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
-    }
 }

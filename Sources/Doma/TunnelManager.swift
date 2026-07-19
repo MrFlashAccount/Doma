@@ -14,6 +14,7 @@ final class TunnelManager: ObservableObject {
     @Published private(set) var conflictCount = 0
     @Published private(set) var remoteCount = 0
     @Published private(set) var lastError: String?
+    @Published private(set) var lastWarning: String?
     @Published private(set) var hostKeyChanged = false
     @Published private(set) var lastSync: Date?
     @Published private(set) var isSyncing = false
@@ -41,12 +42,20 @@ final class TunnelManager: ObservableObject {
     init(
         preview: Bool = false,
         previewConnectionError: Bool = false,
-        previewHostKeyChanged: Bool = false
+        previewHostKeyChanged: Bool = false,
+        previewRemotePermissionError: Bool = false
     ) {
         #if DEBUG
         if preview {
             loadPreviewState()
-            if previewHostKeyChanged {
+            if previewRemotePermissionError {
+                state = .failed
+                services = []
+                activeCount = 0
+                conflictCount = 0
+                remoteCount = 0
+                lastError = "Недостаточно прав на SSH-сервере studio: Doma не может прочитать listening sockets. Проверь права удалённого пользователя на /proc/net/tcp и запуск ss."
+            } else if previewHostKeyChanged {
                 state = .failed
                 services = []
                 activeCount = 0
@@ -361,9 +370,9 @@ final class TunnelManager: ObservableObject {
                             self?.handleInventoryChange(for: host)
                         }
                     },
-                    onTermination: { [weak self] error in
+                    onTermination: { [weak self] termination in
                         Task { @MainActor in
-                            self?.handleMonitorTermination(for: host, error: error)
+                            self?.handleMonitorTermination(for: host, termination: termination)
                         }
                     }
                 )
@@ -384,7 +393,7 @@ final class TunnelManager: ObservableObject {
         requestSync()
     }
 
-    private func handleMonitorTermination(for host: String, error: String?) {
+    private func handleMonitorTermination(for host: String, termination: RemoteMonitorTermination) {
         guard monitorHost == host, selectedHost == host, !isShuttingDown else { return }
         monitor = nil
         monitorHost = nil
@@ -397,9 +406,12 @@ final class TunnelManager: ObservableObject {
         syncTask?.cancel()
         syncPending = false
         state = .failed
-        lastError = error ?? "Соединение с удалённым монитором закрыто"
+        lastError = termination.message ?? "Соединение с удалённым монитором закрыто"
+        lastWarning = nil
         hostKeyChanged = false
-        scheduleReconnect(for: host)
+        if termination.shouldRetryAutomatically {
+            scheduleReconnect(for: host)
+        }
     }
 
     private func stopMonitoring() {
@@ -497,6 +509,7 @@ final class TunnelManager: ObservableObject {
         conflictCount = result.conflicts.count
         remoteCount = result.remoteCount
         lastError = result.error
+        lastWarning = result.warning
         hostKeyChanged = result.hostKeyChanged
         lastSync = Date()
         persistStatus(result)
@@ -557,6 +570,7 @@ final class TunnelManager: ObservableObject {
             "conflicts": result.conflicts.sorted(),
             "remoteCount": result.remoteCount,
             "error": result.error.map { $0 as Any } ?? NSNull(),
+            "warning": result.warning.map { $0 as Any } ?? NSNull(),
             "services": result.services.map { service in
                 [
                     "port": service.port,
@@ -589,6 +603,7 @@ final class TunnelManager: ObservableObject {
         conflictCount = 0
         remoteCount = 0
         lastError = nil
+        lastWarning = nil
         hostKeyChanged = false
         if !keepState {
             state = .disconnected

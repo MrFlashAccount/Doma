@@ -14,14 +14,17 @@ struct DomaApp: App {
 
     init() {
         #if DEBUG
+        let previewRemotePermissionError = CommandLine.arguments.contains("--preview-remote-permission-error")
         let previewHostKeyChanged = CommandLine.arguments.contains("--preview-host-key-changed")
         let previewConnectionError = CommandLine.arguments.contains("--preview-connection-error")
         let isPreview = CommandLine.arguments.contains("--preview-window")
             || CommandLine.arguments.contains("--preview-menubar-icon")
             || previewConnectionError
             || previewHostKeyChanged
+            || previewRemotePermissionError
             || ProcessInfo.processInfo.environment["DOMA_PREVIEW"] == "1"
         #else
+        let previewRemotePermissionError = false
         let previewHostKeyChanged = false
         let previewConnectionError = false
         let isPreview = false
@@ -29,7 +32,8 @@ struct DomaApp: App {
         let manager = TunnelManager(
             preview: isPreview,
             previewConnectionError: previewConnectionError,
-            previewHostKeyChanged: previewHostKeyChanged
+            previewHostKeyChanged: previewHostKeyChanged,
+            previewRemotePermissionError: previewRemotePermissionError
         )
         let updates = UpdateController(startingUpdater: !isPreview)
         _manager = StateObject(wrappedValue: manager)

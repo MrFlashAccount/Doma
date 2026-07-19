@@ -111,7 +111,7 @@ struct ContentView: View {
                 hostMenu
                 Text(connectionSummary)
                     .font(.caption)
-                    .foregroundStyle(manager.lastError == nil ? Color.secondary : Color.red)
+                    .foregroundStyle(connectionSummaryColor)
                     .lineLimit(1)
             }
 
@@ -550,6 +550,9 @@ struct ContentView: View {
         if let error = manager.lastError {
             return error
         }
+        if let warning = manager.lastWarning {
+            return warning
+        }
         switch manager.state {
         case .connected:
             return "\(manager.activeCount) из \(manager.remoteCount) портов"
@@ -560,6 +563,12 @@ struct ContentView: View {
         case .disconnected:
             return "Не подключено"
         }
+    }
+
+    private var connectionSummaryColor: Color {
+        if manager.lastError != nil { return .red }
+        if manager.lastWarning != nil { return .orange }
+        return .secondary
     }
 
     private var emptyStateDescription: String {
