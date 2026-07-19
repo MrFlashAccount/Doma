@@ -4,7 +4,7 @@ enum TunnelEngine {
     private static let ssh = "/usr/bin/ssh"
     private static let bindAddress = "127.0.0.1"
     private static let forwardLimit = 128
-    private static let disappearGrace: TimeInterval = 10
+    static let disappearGrace: TimeInterval = 10
 
     private struct RawListener {
         let port: Int
@@ -32,6 +32,10 @@ enum TunnelEngine {
 
     static func stopMaster(host: String) {
         shutdown(host: host, activeForwards: [])
+    }
+
+    static func prepareMaster(host: String) -> Int? {
+        ensureMaster(host: host, socket: socketPath(for: host))
     }
 
     static func shutdown(host: String, activeForwards: Set<Int>) {

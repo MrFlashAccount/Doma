@@ -3,6 +3,9 @@ import Foundation
 
 @MainActor
 final class TunnelManager: ObservableObject {
+    private static let fullResyncInterval: TimeInterval = 300
+    private static let conflictRetryInterval: TimeInterval = 15
+
     @Published private(set) var hosts: [SSHHost] = []
     @Published private(set) var selectedHost = ""
     @Published private(set) var state: ConnectionState = .disconnected
@@ -19,9 +22,19 @@ final class TunnelManager: ObservableObject {
     private var masterPID: Int?
     private var activeForwards = Set<Int>()
     private var missingSince: [Int: Date] = [:]
-    private var loopTask: Task<Void, Never>?
+    private var monitor: RemoteInventoryMonitor?
+    private var monitorHost: String?
+    private var connectionTask: Task<Void, Never>?
+    private var connectionGeneration: UUID?
+    private var syncTask: Task<Void, Never>?
+    private var resyncTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var disappearanceTask: Task<Void, Never>?
+    private var conflictRetryTask: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
     private var shutdownCompletions: [@MainActor () -> Void] = []
+    private var syncPending = false
+    private var reconnectAttempt = 0
     private var isShuttingDown = false
 
     init(preview: Bool = false) {
@@ -37,7 +50,7 @@ final class TunnelManager: ObservableObject {
         selectedHost = hosts.contains(where: { $0.alias == saved })
             ? saved!
             : (hosts.first(where: { $0.alias == "buddy" })?.alias ?? hosts.first?.alias ?? "")
-        startLoop()
+        beginMonitoring()
     }
 
     #if DEBUG
@@ -113,7 +126,13 @@ final class TunnelManager: ObservableObject {
     #endif
 
     deinit {
-        loopTask?.cancel()
+        monitor?.stop()
+        connectionTask?.cancel()
+        syncTask?.cancel()
+        resyncTask?.cancel()
+        reconnectTask?.cancel()
+        disappearanceTask?.cancel()
+        conflictRetryTask?.cancel()
         shutdownTask?.cancel()
     }
 
@@ -130,6 +149,7 @@ final class TunnelManager: ObservableObject {
     func selectHost(_ alias: String) {
         guard alias != selectedHost else { return }
         let previous = selectedHost
+        stopMonitoring()
         selectedHost = alias
         UserDefaults.standard.set(alias, forKey: "selectedHost")
         resetRuntime()
@@ -139,22 +159,35 @@ final class TunnelManager: ObservableObject {
                 TunnelEngine.stopMaster(host: previous)
             }
         }
-        syncNow()
+        beginMonitoring()
     }
 
     func reconnect() {
         guard !selectedHost.isEmpty else { return }
         let host = selectedHost
+        stopMonitoring()
         state = .connecting
         resetRuntime(keepState: true)
-        Task {
+        let generation = UUID()
+        connectionGeneration = generation
+        connectionTask = Task { [weak self] in
             await Task.detached { TunnelEngine.stopMaster(host: host) }.value
-            await synchronize()
+            guard let self, connectionGeneration == generation else { return }
+            connectionTask = nil
+            connectionGeneration = nil
+            guard !Task.isCancelled, selectedHost == host, !isShuttingDown else { return }
+            beginMonitoring()
         }
     }
 
     func syncNow() {
-        Task { await synchronize() }
+        guard monitor != nil else {
+            if connectionTask == nil {
+                beginMonitoring()
+            }
+            return
+        }
+        requestSync()
     }
 
     func openService(_ service: RemoteService) {
@@ -173,8 +206,7 @@ final class TunnelManager: ObservableObject {
         guard shutdownTask == nil else { return }
 
         isShuttingDown = true
-        loopTask?.cancel()
-        loopTask = nil
+        stopMonitoring()
         state = .disconnected
 
         shutdownTask = Task { [weak self] in
@@ -221,7 +253,7 @@ final class TunnelManager: ObservableObject {
             }.value
             resolvingPorts.remove(port)
             conflictResolutionError = error
-            await synchronize()
+            requestSync()
         }
     }
 
@@ -229,30 +261,176 @@ final class TunnelManager: ObservableObject {
         conflictResolutionError = nil
     }
 
-    private func startLoop() {
-        loopTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.synchronize()
-                try? await Task.sleep(for: .seconds(2))
+    private func beginMonitoring() {
+        guard !selectedHost.isEmpty,
+              !isShuttingDown,
+              monitor == nil,
+              connectionTask == nil
+        else { return }
+
+        let host = selectedHost
+        let generation = UUID()
+        state = .connecting
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        connectionGeneration = generation
+
+        connectionTask = Task { [weak self] in
+            let masterPID = await Task.detached {
+                TunnelEngine.prepareMaster(host: host)
+            }.value
+
+            guard let self else { return }
+            guard connectionGeneration == generation else { return }
+            connectionTask = nil
+            connectionGeneration = nil
+            guard !Task.isCancelled, selectedHost == host, !isShuttingDown else {
+                return
+            }
+            guard let masterPID else {
+                state = .failed
+                lastError = "Не удалось установить SSH-соединение"
+                scheduleReconnect(for: host)
+                return
+            }
+
+            self.masterPID = masterPID
+            let monitor = RemoteInventoryMonitor(
+                host: host,
+                socketPath: TunnelEngine.socketPath(for: host)
+            )
+            do {
+                try monitor.start(
+                    onChange: { [weak self] in
+                        Task { @MainActor in
+                            self?.handleInventoryChange(for: host)
+                        }
+                    },
+                    onTermination: { [weak self] error in
+                        Task { @MainActor in
+                            self?.handleMonitorTermination(for: host, error: error)
+                        }
+                    }
+                )
+                self.monitor = monitor
+                monitorHost = host
+                startResyncLoop(for: host)
+            } catch {
+                state = .failed
+                lastError = error.localizedDescription
+                scheduleReconnect(for: host)
             }
         }
     }
 
-    private func synchronize() async {
-        guard !isSyncing, !selectedHost.isEmpty, !isShuttingDown else { return }
+    private func handleInventoryChange(for host: String) {
+        guard monitorHost == host, selectedHost == host, !isShuttingDown else { return }
+        requestSync()
+    }
+
+    private func handleMonitorTermination(for host: String, error: String?) {
+        guard monitorHost == host, selectedHost == host, !isShuttingDown else { return }
+        monitor = nil
+        monitorHost = nil
+        resyncTask?.cancel()
+        resyncTask = nil
+        disappearanceTask?.cancel()
+        disappearanceTask = nil
+        conflictRetryTask?.cancel()
+        conflictRetryTask = nil
+        syncTask?.cancel()
+        syncPending = false
+        state = .failed
+        lastError = error ?? "Соединение с удалённым монитором закрыто"
+        scheduleReconnect(for: host)
+    }
+
+    private func stopMonitoring() {
+        monitor?.stop()
+        monitor = nil
+        monitorHost = nil
+        connectionTask?.cancel()
+        connectionTask = nil
+        connectionGeneration = nil
+        syncTask?.cancel()
+        resyncTask?.cancel()
+        resyncTask = nil
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        disappearanceTask?.cancel()
+        disappearanceTask = nil
+        conflictRetryTask?.cancel()
+        conflictRetryTask = nil
+        syncPending = false
+    }
+
+    private func scheduleReconnect(for host: String) {
+        guard selectedHost == host, !isShuttingDown, reconnectTask == nil else { return }
+        reconnectAttempt += 1
+        let delay = min(30, 1 << min(reconnectAttempt - 1, 5))
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled, selectedHost == host, !isShuttingDown else { return }
+            reconnectTask = nil
+            beginMonitoring()
+        }
+    }
+
+    private func startResyncLoop(for host: String) {
+        resyncTask?.cancel()
+        resyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.fullResyncInterval))
+                guard let self, !Task.isCancelled, monitorHost == host else { return }
+                requestSync()
+            }
+        }
+    }
+
+    private func requestSync() {
+        guard !selectedHost.isEmpty, !isShuttingDown, monitor != nil else { return }
+        syncPending = true
+        guard syncTask == nil else { return }
+        syncTask = Task { [weak self] in
+            await self?.drainSyncRequests()
+        }
+    }
+
+    private func drainSyncRequests() async {
+        guard !isSyncing else { return }
         isSyncing = true
-        if masterPID == nil {
-            state = .connecting
+        defer {
+            isSyncing = false
+            syncTask = nil
+            if syncPending, !isShuttingDown {
+                requestSync()
+            }
         }
 
-        let input = CycleInput(
-            host: selectedHost,
-            previousMasterPID: masterPID,
-            activeForwards: activeForwards,
-            missingSince: missingSince
-        )
-        let result = await Task.detached { TunnelEngine.cycle(input) }.value
+        while syncPending, !Task.isCancelled, !isShuttingDown, monitor != nil {
+            syncPending = false
+            let host = selectedHost
+            if masterPID == nil {
+                state = .connecting
+            }
 
+            let input = CycleInput(
+                host: host,
+                previousMasterPID: masterPID,
+                activeForwards: activeForwards,
+                missingSince: missingSince
+            )
+            let result = await Task.detached { TunnelEngine.cycle(input) }.value
+            guard !Task.isCancelled,
+                  selectedHost == host,
+                  monitorHost == host,
+                  !isShuttingDown
+            else { continue }
+            apply(result, for: host)
+        }
+    }
+
+    private func apply(_ result: CycleResult, for host: String) {
         masterPID = result.masterPID
         activeForwards = result.activeForwards
         missingSince = result.missingSince
@@ -264,7 +442,49 @@ final class TunnelManager: ObservableObject {
         lastError = result.error
         lastSync = Date()
         persistStatus(result)
-        isSyncing = false
+        scheduleDisappearanceSync()
+        scheduleConflictRetry(hasConflicts: !result.conflicts.isEmpty)
+
+        if result.state == .failed {
+            syncPending = false
+            monitor?.stop()
+            monitor = nil
+            monitorHost = nil
+            resyncTask?.cancel()
+            resyncTask = nil
+            disappearanceTask?.cancel()
+            disappearanceTask = nil
+            conflictRetryTask?.cancel()
+            conflictRetryTask = nil
+            scheduleReconnect(for: host)
+        } else {
+            reconnectAttempt = 0
+        }
+    }
+
+    private func scheduleDisappearanceSync() {
+        disappearanceTask?.cancel()
+        disappearanceTask = nil
+        guard let earliest = missingSince.values.min() else { return }
+        let delay = max(2, earliest.addingTimeInterval(TunnelEngine.disappearGrace).timeIntervalSinceNow)
+        disappearanceTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            disappearanceTask = nil
+            requestSync()
+        }
+    }
+
+    private func scheduleConflictRetry(hasConflicts: Bool) {
+        conflictRetryTask?.cancel()
+        conflictRetryTask = nil
+        guard hasConflicts else { return }
+        conflictRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.conflictRetryInterval))
+            guard let self, !Task.isCancelled else { return }
+            conflictRetryTask = nil
+            requestSync()
+        }
     }
 
     private func persistStatus(_ result: CycleResult) {
