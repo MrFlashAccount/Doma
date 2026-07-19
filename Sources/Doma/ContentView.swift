@@ -621,6 +621,8 @@ struct ContentView: View {
     private func kindColor(_ kind: ServiceKind) -> Color {
         switch kind {
         case .docker: .blue
+        case .hermes: .orange
+        case .kubernetes: .teal
         case .minikube: .indigo
         case .vite: .yellow
         case .node: .green

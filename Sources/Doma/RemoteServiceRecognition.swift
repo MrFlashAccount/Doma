@@ -65,6 +65,8 @@ struct RemoteServiceRecognitionPipeline {
             ZrokRemoteServiceRecognizer(inventory: inventory),
             MinikubeRemoteServiceRecognizer(),
             DockerRemoteServiceRecognizer(),
+            HermesRemoteServiceRecognizer(),
+            KubernetesPortForwardRemoteServiceRecognizer(),
             SystemRemoteServiceRecognizer(),
             ViteRemoteServiceRecognizer(),
             JavaScriptRuntimeRemoteServiceRecognizer(),

@@ -30,7 +30,7 @@ There is no new `ssh -L` command and no tunnel restart. When the service disappe
 
 ## Everything in one menu
 
-- **See what is actually running.** Doma names Docker Compose and Minikube services; recognizes Vite, Bun/Node, Python, zrok, and generic user processes; and separates system-owned services.
+- **See what is actually running.** Doma names Docker Compose, Minikube infrastructure, Kubernetes port-forwards, Hermes, Vite, Bun/Node, Python, zrok, and generic user processes; and separates system-owned services.
 - **Keep large stacks readable.** Services are grouped into collapsible projects instead of becoming one long port list.
 - **Open a service with one click.** Select any forwarded service to open its local URL in your browser.
 - **Notice problems immediately.** Local port conflicts are shown separately instead of failing silently.
