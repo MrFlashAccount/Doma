@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var hoveredPort: Int?
     @State private var collapsedGroups = Set<String>()
     @State private var conflictResolutionRequest: RemoteService?
+    @State private var connectionErrorMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,6 +23,27 @@ struct ContentView: View {
         .onAppear {
             launchAtLogin.refresh()
             updates.checkForUpdatesSilentlyIfNeeded()
+            if manager.state == .failed, let error = manager.lastError {
+                connectionErrorMessage = error
+            }
+        }
+        .onChange(of: manager.lastError) { _, error in
+            guard manager.state == .failed, let error else { return }
+            connectionErrorMessage = error
+        }
+        .alert(
+            "Не удалось подключиться к \(manager.selectedHost)",
+            isPresented: connectionErrorBinding
+        ) {
+            Button("Повторить") {
+                connectionErrorMessage = nil
+                manager.reconnect()
+            }
+            Button("Закрыть", role: .cancel) {
+                connectionErrorMessage = nil
+            }
+        } message: {
+            Text(connectionErrorMessage ?? "Неизвестная ошибка SSH")
         }
         .alert(
             "Не удалось изменить автозапуск",
@@ -227,20 +249,15 @@ struct ContentView: View {
                     }
                 }
 
-                Divider()
+                if let version = updates.availableVersion {
+                    Divider()
 
-                Button {
-                    updates.performPrimaryAction()
-                } label: {
-                    if let version = updates.availableVersion {
-                        Label("Обновить \(version)…", systemImage: "arrow.down.circle.fill")
-                    } else if updates.isCheckingForUpdates {
-                        Label("Проверяем обновления…", systemImage: "arrow.triangle.2.circlepath")
-                    } else {
-                        Label("Проверить обновления…", systemImage: "arrow.down.circle")
+                    Button {
+                        updates.performPrimaryAction()
+                    } label: {
+                        Text("Обновить \(version)…")
                     }
                 }
-                .disabled(!updates.canCheckForUpdates || updates.isCheckingForUpdates)
 
                 Divider()
 
@@ -485,6 +502,17 @@ struct ContentView: View {
             set: { isPresented in
                 if !isPresented {
                     manager.clearConflictResolutionError()
+                }
+            }
+        )
+    }
+
+    private var connectionErrorBinding: Binding<Bool> {
+        Binding(
+            get: { connectionErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    connectionErrorMessage = nil
                 }
             }
         )

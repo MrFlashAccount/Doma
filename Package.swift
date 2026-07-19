@@ -7,6 +7,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "Doma", targets: ["Doma"]),
+        .executable(name: "DomaAskPass", targets: ["DomaAskPass"]),
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4"),
@@ -21,6 +22,10 @@ let package = Package(
             swiftSettings: [
                 .define("DEBUG", .when(configuration: .debug)),
             ]
+        ),
+        .executableTarget(
+            name: "DomaAskPass",
+            path: "Sources/DomaAskPass"
         ),
         .testTarget(
             name: "DomaTests",

@@ -37,10 +37,18 @@ final class TunnelManager: ObservableObject {
     private var reconnectAttempt = 0
     private var isShuttingDown = false
 
-    init(preview: Bool = false) {
+    init(preview: Bool = false, previewConnectionError: Bool = false) {
         #if DEBUG
         if preview {
             loadPreviewState()
+            if previewConnectionError {
+                state = .failed
+                services = []
+                activeCount = 0
+                conflictCount = 0
+                remoteCount = 0
+                lastError = "Не удалось найти SSH-сервер studio. Проверь SSH alias и сеть."
+            }
             return
         }
         #endif
@@ -276,7 +284,7 @@ final class TunnelManager: ObservableObject {
         connectionGeneration = generation
 
         connectionTask = Task { [weak self] in
-            let masterPID = await Task.detached {
+            let preparation = await Task.detached {
                 TunnelEngine.prepareMaster(host: host)
             }.value
 
@@ -287,10 +295,12 @@ final class TunnelManager: ObservableObject {
             guard !Task.isCancelled, selectedHost == host, !isShuttingDown else {
                 return
             }
-            guard let masterPID else {
+            guard let masterPID = preparation.pid else {
                 state = .failed
-                lastError = "Не удалось установить SSH-соединение"
-                scheduleReconnect(for: host)
+                lastError = preparation.error ?? "Не удалось установить SSH-соединение"
+                if preparation.shouldRetryAutomatically {
+                    scheduleReconnect(for: host)
+                }
                 return
             }
 
@@ -456,7 +466,9 @@ final class TunnelManager: ObservableObject {
             disappearanceTask = nil
             conflictRetryTask?.cancel()
             conflictRetryTask = nil
-            scheduleReconnect(for: host)
+            if result.shouldRetryAutomatically {
+                scheduleReconnect(for: host)
+            }
         } else {
             reconnectAttempt = 0
         }

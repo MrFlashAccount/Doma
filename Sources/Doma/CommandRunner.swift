@@ -9,6 +9,7 @@ enum CommandRunner {
         _ executable: String,
         arguments: [String],
         stdin: String? = nil,
+        environment: [String: String]? = nil,
         timeout: TimeInterval = 10
     ) -> CommandResult {
         let process = Process()
@@ -18,6 +19,7 @@ enum CommandRunner {
 
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = environment
         process.standardOutput = output
         process.standardError = errors
         if stdin != nil {

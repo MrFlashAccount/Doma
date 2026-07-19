@@ -8,20 +8,24 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
+HELPERS_DIR="$CONTENTS_DIR/Helpers"
 ICON_SOURCE="$ROOT/Resources/AppIcon.icns"
 VERSION="${DOMA_VERSION:-0.1.0}"
 BUILD_NUMBER="${DOMA_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-1}}"
 
 swift build -c release --package-path "$ROOT" --product Doma
+swift build -c release --package-path "$ROOT" --product DomaAskPass
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR" "$HELPERS_DIR"
 
 cp "$BUILD_DIR/Doma" "$MACOS_DIR/Doma"
+cp "$BUILD_DIR/DomaAskPass" "$HELPERS_DIR/DomaAskPass"
 cp "$ROOT/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$ICON_SOURCE" "$RESOURCES_DIR/Doma.icns"
 /usr/bin/ditto "$BUILD_DIR/Sparkle.framework" "$FRAMEWORKS_DIR/Sparkle.framework"
 chmod 755 "$MACOS_DIR/Doma"
+chmod 755 "$HELPERS_DIR/DomaAskPass"
 
 /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/Doma"
 
@@ -31,5 +35,6 @@ chmod 755 "$MACOS_DIR/Doma"
 /usr/bin/codesign --verify --deep --strict "$APP_DIR"
 /usr/bin/otool -L "$MACOS_DIR/Doma" | /usr/bin/grep '@rpath/Sparkle.framework/Versions/B/Sparkle' >/dev/null
 /usr/bin/otool -l "$MACOS_DIR/Doma" | /usr/bin/grep '@executable_path/../Frameworks' >/dev/null
+test -x "$HELPERS_DIR/DomaAskPass"
 
 echo "$APP_DIR"

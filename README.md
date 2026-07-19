@@ -35,6 +35,7 @@ There is no new `ssh -L` command and no tunnel restart. When the service disappe
 - **Open a service with one click.** Select any forwarded service to open its local URL in your browser.
 - **Notice problems immediately.** Local port conflicts are shown separately instead of failing silently.
 - **Recover automatically.** Doma reconnects on its own and also gives you explicit reconnect and sync actions.
+- **Handle interactive SSH login.** Password, key-passphrase, verification-code, and host-confirmation prompts appear as native macOS dialogs when OpenSSH requests them.
 - **Stay quiet in the background.** One SSH monitor channel reports listener changes instead of triggering full inventory scans every few seconds.
 - **Update in place.** Run a manual update check from the ellipsis menu; Doma verifies, installs, and relaunches available releases.
 - **Start with your Mac.** Enable launch at login and leave Doma in the menu bar.
@@ -63,5 +64,7 @@ Doma binds forwards only to `127.0.0.1`, never `0.0.0.0`. It reads the concrete 
 It watches listening TCP ports in the `1024–32767` range and keeps up to 128 active forwards. A port already occupied on your Mac is reported as a conflict and is never taken over.
 
 The remote watcher is an unprivileged shell helper streamed through Doma's existing SSH ControlMaster. It hashes only the listening-socket table once per second and writes to the channel when that signature changes. Doma then performs one full inventory refresh and reconciles forwards. A five-minute full refresh repairs any missed event; temporary conflicts and disappearing listeners have their own bounded retries. Nothing is installed or left running on the remote host after the channel closes.
+
+Interactive secrets are passed directly from Doma's short-lived secure prompt to OpenSSH through the standard `SSH_ASKPASS` protocol. Doma does not store the password or add it to command-line arguments. Authentication failures stop automatic retries until you explicitly try again, preventing repeated password dialogs.
 
 Updates are delivered through the official GitHub release feed and must pass Sparkle EdDSA verification before extraction.

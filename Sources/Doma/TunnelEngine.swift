@@ -34,7 +34,7 @@ enum TunnelEngine {
         shutdown(host: host, activeForwards: [])
     }
 
-    static func prepareMaster(host: String) -> Int? {
+    static func prepareMaster(host: String) -> SSHMasterPreparation {
         ensureMaster(host: host, socket: socketPath(for: host))
     }
 
@@ -65,7 +65,8 @@ enum TunnelEngine {
 
     static func cycle(_ input: CycleInput) -> CycleResult {
         let socket = socketPath(for: input.host)
-        guard let masterPID = ensureMaster(host: input.host, socket: socket) else {
+        let preparation = ensureMaster(host: input.host, socket: socket)
+        guard let masterPID = preparation.pid else {
             return CycleResult(
                 state: .failed,
                 masterPID: nil,
@@ -74,7 +75,8 @@ enum TunnelEngine {
                 missingSince: [:],
                 services: [],
                 remoteCount: 0,
-                error: "Не удалось установить SSH-соединение"
+                error: preparation.error ?? "Не удалось установить SSH-соединение",
+                shouldRetryAutomatically: preparation.shouldRetryAutomatically
             )
         }
 
@@ -89,7 +91,8 @@ enum TunnelEngine {
                 missingSince: input.missingSince,
                 services: [],
                 remoteCount: 0,
-                error: error.isEmpty ? "Не удалось получить список портов" : error
+                error: error.isEmpty ? "Не удалось получить список портов" : error,
+                shouldRetryAutomatically: true
             )
         }
 
@@ -160,7 +163,8 @@ enum TunnelEngine {
             missingSince: missingSince,
             services: services,
             remoteCount: remotePorts.count,
-            error: nil
+            error: nil,
+            shouldRetryAutomatically: true
         )
     }
 
@@ -170,16 +174,21 @@ enum TunnelEngine {
         }
     }
 
-    private static func ensureMaster(host: String, socket: String) -> Int? {
+    private static func ensureMaster(host: String, socket: String) -> SSHMasterPreparation {
         if let pid = checkMaster(host: host, socket: socket) {
             DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
-            return pid
+            return SSHMasterPreparation(pid: pid, error: nil, shouldRetryAutomatically: true)
         }
 
         guard DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: nil) else {
-            return nil
+            return SSHMasterPreparation(
+                pid: nil,
+                error: "Не удалось завершить прежнее SSH-соединение для \(host).",
+                shouldRetryAutomatically: true
+            )
         }
         cleanupSocket(socket)
+        let authentication = SSHAuthentication.configuration()
         let result = CommandRunner.run(
             ssh,
             arguments: [
@@ -190,21 +199,34 @@ enum TunnelEngine {
                 "-o", "ServerAliveInterval=15",
                 "-o", "ServerAliveCountMax=3",
                 "-o", "TCPKeepAlive=yes",
-                "-o", "BatchMode=yes",
+                "-o", "BatchMode=\(authentication.batchMode)",
+                "-o", "NumberOfPasswordPrompts=1",
                 host,
             ],
-            timeout: 12
+            environment: authentication.environment,
+            timeout: 300
         )
-        guard result.status == 0 else { return nil }
+        guard result.status == 0 else {
+            let details = SSHConnectionErrorFormatter.details(host: host, result: result)
+            return SSHMasterPreparation(
+                pid: nil,
+                error: details.message,
+                shouldRetryAutomatically: details.shouldRetryAutomatically
+            )
+        }
 
         for _ in 0..<20 {
             if let pid = checkMaster(host: host, socket: socket) {
                 DomaSSHMasterRegistry.terminateMasters(socketPath: socket, keeping: Int32(pid))
-                return pid
+                return SSHMasterPreparation(pid: pid, error: nil, shouldRetryAutomatically: true)
             }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        return nil
+        return SSHMasterPreparation(
+            pid: nil,
+            error: "SSH подключился к \(host), но Doma не получила control socket.",
+            shouldRetryAutomatically: true
+        )
     }
 
     private static func checkMaster(host: String, socket: String) -> Int? {
