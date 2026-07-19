@@ -84,7 +84,7 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertNotEqual(service.group, "Системные сервисы")
     }
 
-    func testUnknownSocketUIDRemainsUnknownAndCanInferUserProcess() throws {
+    func testMissingSocketUIDMeansRootAndDoesNotInferUserProcess() throws {
         let output = """
         __USER__
         501
@@ -101,9 +101,9 @@ final class ServiceRecognitionTests: XCTestCase {
             TunnelEngine.services(fromInventoryOutput: output).first
         )
 
-        XCTAssertNil(try XCTUnwrap(inventory.listeners.first).userID)
-        XCTAssertEqual(service.kind, .node)
-        XCTAssertEqual(service.name, "Bun")
+        XCTAssertEqual(try XCTUnwrap(inventory.listeners.first).userID, 0)
+        XCTAssertEqual(service.kind, .system)
+        XCTAssertEqual(service.name, "root service")
     }
 
     func testRecognizesKubectlPortForwardAsKubernetesService() throws {
@@ -152,7 +152,7 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertFalse(service.details.contains("default"))
     }
 
-    func testUnknownSocketOwnerWithoutProcessEvidenceStaysGeneric() throws {
+    func testMissingSocketUIDWithoutProcessEvidenceIsRootService() throws {
         let output = """
         __USER__
         501
@@ -167,8 +167,9 @@ final class ServiceRecognitionTests: XCTestCase {
             TunnelEngine.services(fromInventoryOutput: output).first
         )
 
-        XCTAssertEqual(service.kind, .process)
-        XCTAssertNotEqual(service.group, "Системные сервисы")
+        XCTAssertEqual(service.kind, .system)
+        XCTAssertEqual(service.group, "Системные сервисы")
+        XCTAssertEqual(service.name, "root service")
     }
 
     func testInventoryNeverAttemptsPrivilegeEscalation() {
