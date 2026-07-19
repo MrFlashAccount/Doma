@@ -52,7 +52,8 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(byPort[8765]).name, "zrok Share · architecture-p8765")
         XCTAssertEqual(try XCTUnwrap(byPort[8888]).name, "zrok Admin Panel")
         XCTAssertEqual(try XCTUnwrap(byPort[10005]).group, "Системные сервисы")
-        XCTAssertEqual(try XCTUnwrap(byPort[9119]).kind, .system)
+        XCTAssertEqual(try XCTUnwrap(byPort[9119]).kind, .hermes)
+        XCTAssertEqual(try XCTUnwrap(byPort[9119]).name, "Hermes Dashboard")
         XCTAssertEqual(try XCTUnwrap(byPort[12000]).kind, .docker)
         XCTAssertEqual(try XCTUnwrap(byPort[12000]).group, "volga")
         XCTAssertEqual(try XCTUnwrap(byPort[12000]).name, "root-front")
@@ -103,6 +104,30 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertNil(try XCTUnwrap(inventory.listeners.first).userID)
         XCTAssertEqual(service.kind, .node)
         XCTAssertEqual(service.name, "Bun")
+    }
+
+    func testRecognizesKubectlPortForwardAsKubernetesService() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 4096 127.0.0.1:19012 0.0.0.0:* uid:501 ino:12
+        __DOCKER__
+        __PS__
+        300 1 501 demo fish fish -c kubectl --context transformator-poc -n transformator-poc port-forward service/first-transformator-core-poc-worker-pool 19012:9010
+        301 300 501 demo kubectl kubectl --context transformator-poc -n transformator-poc port-forward service/first-transformator-core-poc-worker-pool 19012:9010
+        __CWD__
+        """
+
+        let service = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: output).first
+        )
+
+        XCTAssertEqual(service.kind, .kubernetes)
+        XCTAssertEqual(service.name, "first-transformator-core-poc-worker-pool")
+        XCTAssertEqual(service.group, "Kubernetes · transformator-poc")
+        XCTAssertTrue(service.details.contains("namespace: transformator-poc"))
+        XCTAssertTrue(service.details.contains("19012 → 9010"))
     }
 
     func testUnknownSocketOwnerWithoutProcessEvidenceStaysGeneric() throws {

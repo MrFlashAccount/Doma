@@ -27,6 +27,8 @@ enum ConnectionState: String, Sendable {
 
 enum ServiceKind: String, Sendable {
     case docker
+    case hermes
+    case kubernetes
     case minikube
     case vite
     case node
@@ -38,6 +40,8 @@ enum ServiceKind: String, Sendable {
     var title: String {
         switch self {
         case .docker: "Docker"
+        case .hermes: "Hermes"
+        case .kubernetes: "Kubernetes"
         case .minikube: "Minikube"
         case .vite: "Vite"
         case .node: "Bun / Node"
@@ -51,6 +55,8 @@ enum ServiceKind: String, Sendable {
     var symbol: String {
         switch self {
         case .docker: "shippingbox.fill"
+        case .hermes: "message.fill"
+        case .kubernetes: "point.3.connected.trianglepath.dotted"
         case .minikube: "hexagon.fill"
         case .vite: "bolt.fill"
         case .node: "server.rack"
