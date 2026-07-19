@@ -11,7 +11,7 @@ struct KubernetesPortForwardRemoteServiceRecognizer: RemoteServiceRecognizing {
         else { return nil }
 
         let arguments = context.process?.arguments ?? context.processText
-        let namespace = option(in: arguments, short: "-n", long: "--namespace") ?? "default"
+        let namespace = option(in: arguments, short: "-n", long: "--namespace")
         let clusterContext = option(in: arguments, short: nil, long: "--context")
         let targetPort = capture(
             in: arguments,
@@ -27,7 +27,7 @@ struct KubernetesPortForwardRemoteServiceRecognizer: RemoteServiceRecognizing {
             group: group(clusterContext: clusterContext, namespace: namespace),
             details: RemoteServiceDetails.joined(
                 resourceKind,
-                "namespace: \(namespace)",
+                namespace.map { "namespace: \($0)" },
                 targetPort.map { "\(context.port) → \($0)" },
                 arguments
             )
@@ -43,12 +43,18 @@ struct KubernetesPortForwardRemoteServiceRecognizer: RemoteServiceRecognizing {
         )
     }
 
-    private func group(clusterContext: String?, namespace: String) -> String {
-        guard let clusterContext else { return "Kubernetes · \(namespace)" }
-        if namespace == "default" || namespace == clusterContext {
+    private func group(clusterContext: String?, namespace: String?) -> String {
+        switch (clusterContext, namespace) {
+        case let (clusterContext?, namespace?)
+        where namespace != "default" && namespace != clusterContext:
+            return "Kubernetes · \(clusterContext) / \(namespace)"
+        case let (clusterContext?, _):
             return "Kubernetes · \(clusterContext)"
+        case let (nil, namespace?):
+            return "Kubernetes · \(namespace)"
+        case (nil, nil):
+            return "Kubernetes"
         }
-        return "Kubernetes · \(clusterContext) / \(namespace)"
     }
 
     private func capture(in text: String, pattern: String) -> String? {

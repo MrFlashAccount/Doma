@@ -130,6 +130,28 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertTrue(service.details.contains("19012 → 9010"))
     }
 
+    func testKubectlPortForwardDoesNotInventDefaultNamespace() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 4096 127.0.0.1:19020 0.0.0.0:* uid:501 ino:20
+        __DOCKER__
+        __PS__
+        320 1 501 demo kubectl kubectl --context staging port-forward service/api 19020:8080
+        __CWD__
+        """
+
+        let service = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: output).first
+        )
+
+        XCTAssertEqual(service.kind, .kubernetes)
+        XCTAssertEqual(service.group, "Kubernetes · staging")
+        XCTAssertFalse(service.details.contains("namespace:"))
+        XCTAssertFalse(service.details.contains("default"))
+    }
+
     func testUnknownSocketOwnerWithoutProcessEvidenceStaysGeneric() throws {
         let output = """
         __USER__
