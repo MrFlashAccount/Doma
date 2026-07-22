@@ -28,9 +28,12 @@ struct ContentView: View {
             updates.checkForUpdatesSilentlyIfNeeded()
         }
         .onChange(of: manager.state) { _, state in
-            if state != .failed {
+            if state == .connected {
                 dismissedConnectionError = nil
             }
+        }
+        .onChange(of: manager.selectedHost) { _, _ in
+            dismissedConnectionError = nil
         }
         .alert(
             "Забыть старый ключ \(manager.selectedHost)?",
@@ -213,7 +216,9 @@ struct ContentView: View {
                         Text(error)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(4)
+                            .truncationMode(.tail)
+                            .help(error)
                     }
 
                     Spacer(minLength: 4)
