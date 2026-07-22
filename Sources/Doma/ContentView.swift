@@ -10,13 +10,14 @@ struct ContentView: View {
     @State private var isHostMenuHovered = false
     @State private var collapsedGroups = Set<String>()
     @State private var conflictResolutionRequest: RemoteService?
-    @State private var connectionErrorMessage: String?
+    @State private var dismissedConnectionError: String?
     @State private var staleHostKeyRemovalRequested = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             overview
+            connectionFailureBanner
             searchField
             serviceList
             footer
@@ -25,34 +26,14 @@ struct ContentView: View {
         .onAppear {
             launchAtLogin.refresh()
             updates.checkForUpdatesSilentlyIfNeeded()
-            if manager.state == .failed, let error = manager.lastError {
-                connectionErrorMessage = error
+        }
+        .onChange(of: manager.state) { _, state in
+            if state == .connected {
+                dismissedConnectionError = nil
             }
         }
-        .onChange(of: manager.lastError) { _, error in
-            guard manager.state == .failed, let error else { return }
-            connectionErrorMessage = error
-        }
-        .alert(
-            "Не удалось подключиться к \(manager.selectedHost)",
-            isPresented: connectionErrorBinding
-        ) {
-            if manager.hostKeyChanged {
-                Button("Забыть старый ключ…") {
-                    connectionErrorMessage = nil
-                    staleHostKeyRemovalRequested = true
-                }
-            } else {
-                Button("Повторить") {
-                    connectionErrorMessage = nil
-                    manager.reconnect()
-                }
-            }
-            Button("Закрыть", role: .cancel) {
-                connectionErrorMessage = nil
-            }
-        } message: {
-            Text(connectionErrorMessage ?? "Неизвестная ошибка SSH")
+        .onChange(of: manager.selectedHost) { _, _ in
+            dismissedConnectionError = nil
         }
         .alert(
             "Забыть старый ключ \(manager.selectedHost)?",
@@ -213,6 +194,71 @@ struct ContentView: View {
         .background(Color.primary.opacity(0.035))
         .overlay(alignment: .bottom) {
             separator
+        }
+    }
+
+    @ViewBuilder
+    private var connectionFailureBanner: some View {
+        if manager.state == .failed,
+           let error = manager.lastError,
+           dismissedConnectionError != error
+        {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .top, spacing: 9) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.red)
+                        .frame(width: 16, height: 16)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Не удалось подключиться к \(manager.selectedHost)")
+                            .font(.caption.weight(.semibold))
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(4)
+                            .truncationMode(.tail)
+                            .help(error)
+                    }
+
+                    Spacer(minLength: 4)
+
+                    Button {
+                        dismissedConnectionError = error
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Скрыть ошибку")
+                    .accessibilityLabel("Скрыть ошибку подключения")
+                }
+
+                HStack(spacing: 8) {
+                    Spacer()
+                    if manager.hostKeyChanged {
+                        Button("Проверить ключ…") {
+                            staleHostKeyRemovalRequested = true
+                        }
+                    } else {
+                        Button("Повторить") {
+                            manager.reconnect()
+                        }
+                    }
+                }
+                .controlSize(.small)
+            }
+            .padding(11)
+            .background(Color.red.opacity(0.075), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.red.opacity(0.16), lineWidth: 1)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 11)
         }
     }
 
@@ -547,17 +593,6 @@ struct ContentView: View {
             set: { isPresented in
                 if !isPresented {
                     manager.clearConflictResolutionError()
-                }
-            }
-        )
-    }
-
-    private var connectionErrorBinding: Binding<Bool> {
-        Binding(
-            get: { connectionErrorMessage != nil },
-            set: { isPresented in
-                if !isPresented {
-                    connectionErrorMessage = nil
                 }
             }
         )
