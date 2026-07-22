@@ -278,6 +278,31 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertNil(TunnelEngine.inventoryWarning(in: output))
     }
 
+    func testCompletenessWarningsIgnoreHiddenAndForeignOwnedSockets() {
+        let output = """
+        __USER__
+        518636
+        __SS__
+        LISTEN 0 5 127.0.0.1:4188 0.0.0.0:* users:(("python3",pid=1033060,fd=3)) uid:518636 ino:1
+        LISTEN 0 128 *:6881 *:* uid:1044 ino:2
+        LISTEN 0 128 127.0.0.1:6882 0.0.0.0:* uid:1044 ino:3
+        LISTEN 0 1 127.0.0.1:10005 0.0.0.0:* ino:4
+        LISTEN 0 4096 127.0.0.1:32788 0.0.0.0:* ino:5
+        LISTEN 0 4096 [::1]:38323 [::]:* uid:518636 ino:6
+        __DOCKER__
+        transformator-poc|gcr.io/k8s-minikube/kicbase:v0.0.50|127.0.0.1:32788->22/tcp|||
+        __PS__
+        1033060 1 518636 sergeigarin python3 python3 -m http.server 4188
+        __CWD__
+        """
+
+        XCTAssertNil(TunnelEngine.inventoryWarning(in: output))
+        XCTAssertEqual(
+            Set(TunnelEngine.services(fromInventoryOutput: output).map(\.port)),
+            [4188, 6881, 6882, 10005, 32788]
+        )
+    }
+
     func testMissingMandatorySocketSectionIsRejected() {
         let output = """
         __DOCKER__

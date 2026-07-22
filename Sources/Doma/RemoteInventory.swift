@@ -189,15 +189,29 @@ enum RemoteInventoryParser {
         if !inventory.sawProcessSection {
             inventory.warnings.insert(.protocolSections)
         }
-        let hasAnySocketProcessMetadata = inventory.listeners.contains {
+
+        let visiblePorts = RemoteServiceRecognitionPipeline(inventory: inventory).eligiblePorts
+        let visibleListeners = inventory.listeners.filter { visiblePorts.contains($0.port) }
+        let relevantListeners: [RemoteListenerRecord]
+        if let currentUserID = inventory.currentUserID {
+            // An unprivileged `ss` normally omits process metadata for sockets
+            // owned by other users. That is expected, and Doma can still label
+            // those visible services by UID or Docker metadata. Hidden sockets
+            // must not degrade the status of the services Doma actually shows.
+            relevantListeners = visibleListeners.filter { $0.userID == currentUserID }
+        } else {
+            relevantListeners = visibleListeners
+        }
+
+        let hasAnySocketProcessMetadata = relevantListeners.contains {
             $0.pid != nil || $0.command != nil
         }
         if hasAnySocketProcessMetadata,
-           inventory.listeners.contains(where: { $0.pid == nil || $0.command == nil })
+           relevantListeners.contains(where: { $0.pid == nil || $0.command == nil })
         {
             inventory.warnings.insert(.partialSockets)
         }
-        let listenerPIDs = Set(inventory.listeners.compactMap(\.pid))
+        let listenerPIDs = Set(relevantListeners.compactMap(\.pid))
         let missingProcessCount = listenerPIDs.subtracting(inventory.processes.keys).count
         if missingProcessCount >= max(1, listenerPIDs.count / 2), !listenerPIDs.isEmpty {
             inventory.warnings.insert(.partialProcesses)
