@@ -76,8 +76,8 @@ struct RemoteServiceRecognitionPipeline {
     }
 
     var eligiblePorts: Set<Int> {
-        let standardPorts = inventory.listeners.lazy.map(\.port).filter { 1024...32767 ~= $0 }
-        return recognizers.reduce(into: Set(standardPorts)) { ports, recognizer in
+        let listenerPorts = inventory.listeners.lazy.map(\.port).filter { 1024...65535 ~= $0 }
+        return recognizers.reduce(into: Set(listenerPorts)) { ports, recognizer in
             ports.formUnion(recognizer.additionalPorts(in: inventory))
         }
     }

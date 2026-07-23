@@ -61,7 +61,7 @@ To start Doma when you sign in, open its ellipsis menu and enable **Запуск
 
 Doma binds forwards only to `127.0.0.1`, never `0.0.0.0`. It reads the concrete hosts from your existing SSH config and maintains its own ControlMaster, so ordinary interactive SSH sessions stay independent.
 
-It watches listening TCP ports in the `1024–65535` range, forwards the normal `1024–32767` service range plus explicitly identified Minikube mappings, and keeps up to 128 active forwards. Unrelated high ephemeral ports stay hidden. A port already occupied on your Mac is reported as a conflict and is never taken over.
+It watches and forwards listening TCP ports in the full `1024–65535` range, including services that choose an ephemeral port, and keeps up to 128 active forwards. A port already occupied on your Mac is reported as a conflict and is never taken over.
 
 The remote watcher and full inventory are unprivileged shell helpers streamed through Doma's existing SSH ControlMaster. Doma never invokes `sudo`. The watcher hashes only the listening-socket table once per second and writes to the channel when that signature changes. Doma then performs one full inventory refresh and reconciles forwards. Process recognition combines the socket UID with ordinary `ps`, Docker, and conservative command-line/parent-process matching; if the remote kernel hides an exact PID mapping, Doma keeps the service generic instead of escalating privileges or guessing. A five-minute full refresh repairs any missed event; temporary conflicts and disappearing listeners have their own bounded retries. Nothing is installed or left running on the remote host after the channel closes.
 
