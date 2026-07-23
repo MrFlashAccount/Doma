@@ -278,7 +278,7 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         XCTAssertNil(TunnelEngine.inventoryWarning(in: output))
     }
 
-    func testCompletenessWarningsIgnoreHiddenAndForeignOwnedSockets() {
+    func testCompletenessWarningsIgnoreForeignOwnedSocketsAcrossFullPortRange() {
         let output = """
         __USER__
         518636
@@ -288,18 +288,19 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         LISTEN 0 128 127.0.0.1:6882 0.0.0.0:* uid:1044 ino:3
         LISTEN 0 1 127.0.0.1:10005 0.0.0.0:* ino:4
         LISTEN 0 4096 127.0.0.1:32788 0.0.0.0:* ino:5
-        LISTEN 0 4096 [::1]:38323 [::]:* uid:518636 ino:6
+        LISTEN 0 4096 [::1]:38323 [::]:* users:(("kubectl",pid=1033061,fd=7)) uid:518636 ino:6
         __DOCKER__
         transformator-poc|gcr.io/k8s-minikube/kicbase:v0.0.50|127.0.0.1:32788->22/tcp|||
         __PS__
         1033060 1 518636 sergeigarin python3 python3 -m http.server 4188
+        1033061 1 518636 sergeigarin kubectl kubectl proxy --port=38323
         __CWD__
         """
 
         XCTAssertNil(TunnelEngine.inventoryWarning(in: output))
         XCTAssertEqual(
             Set(TunnelEngine.services(fromInventoryOutput: output).map(\.port)),
-            [4188, 6881, 6882, 10005, 32788]
+            [4188, 6881, 6882, 10005, 32788, 38323]
         )
     }
 

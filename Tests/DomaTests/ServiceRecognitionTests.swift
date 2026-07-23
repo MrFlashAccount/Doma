@@ -59,7 +59,29 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(byPort[12000]).name, "root-front")
         XCTAssertEqual(try XCTUnwrap(byPort[32773]).kind, .minikube)
         XCTAssertEqual(try XCTUnwrap(byPort[32773]).name, "Minikube SSH")
-        XCTAssertNil(byPort[40000], "Unrelated ephemeral high ports must stay hidden")
+        XCTAssertEqual(try XCTUnwrap(byPort[40000]).kind, .process)
+        XCTAssertEqual(try XCTUnwrap(byPort[40000]).name, "code")
+    }
+
+    func testIncludesEphemeralKubectlProxyPort() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 4096 127.0.0.1:42081 0.0.0.0:* users:(("kubectl",pid=330,fd=7)) uid:501 ino:21
+        __DOCKER__
+        __PS__
+        330 1 501 demo kubectl kubectl proxy --port=42081
+        __CWD__
+        """
+
+        let service = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: output).first
+        )
+
+        XCTAssertEqual(service.port, 42081)
+        XCTAssertEqual(service.kind, .process)
+        XCTAssertEqual(service.name, "kubectl")
     }
 
     func testInfersUniqueProcessFromUIDAndPortWhenSSCannotExposePID() throws {
