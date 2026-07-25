@@ -194,7 +194,14 @@ enum TunnelEngine {
                 forwardingStateIsAuthoritative: false
             )
         }
-        let remotePorts = eligibleRemotePorts(in: inventory)
+        let candidates = serviceCandidates(in: inventory)
+        let discoveredPorts = Set(candidates.keys)
+        let desiredPorts = Set(candidates.compactMap { port, candidate in
+            forwardingEnabled(
+                for: candidate,
+                preference: input.forwardingPreferences[candidate.forwardingKey] ?? .automatic
+            ) ? port : nil
+        })
         let localSnapshot = await LocalProcessController.snapshot()
         if Task.isCancelled {
             return cancelledCycleResult(input)
@@ -207,13 +214,13 @@ enum TunnelEngine {
                 conflicts: [],
                 missingSince: input.missingSince,
                 services: makeServices(
-                    inventory: inventory,
-                    remotePorts: remotePorts,
+                    candidates: candidates,
+                    forwardingPreferences: input.forwardingPreferences,
                     active: [],
                     conflicts: [],
                     localListeners: [:]
                 ),
-                remoteCount: remotePorts.count,
+                remoteCount: discoveredPorts.count,
                 error: nil,
                 warning: combinedWarning(inventory.warningMessage, localSnapshot.warning),
                 shouldRetryAutomatically: true,
@@ -226,6 +233,7 @@ enum TunnelEngine {
         var active = input.previousMasterPID == masterPID ? input.activeForwards : []
         var conflicts = Set<Int>()
         var missingSince = input.previousMasterPID == masterPID ? input.missingSince : [:]
+        var failedForwardingPorts = Set<Int>()
 
         for port in Array(active) where !ownsForward(port: port, masterPID: masterPID, listeners: local) {
             if Task.isCancelled { return cancelledCycleResult(input) }
@@ -233,14 +241,13 @@ enum TunnelEngine {
             missingSince.removeValue(forKey: port)
         }
 
-        let now = Date()
-        for port in Array(active.subtracting(remotePorts)) {
-            let missingAt = missingSince[port] ?? now
-            missingSince[port] = missingAt
-            guard now.timeIntervalSince(missingAt) >= disappearGrace else { continue }
-
+        for port in Array(active.subtracting(desiredPorts).intersection(discoveredPorts)) {
             if Task.isCancelled { return cancelledCycleResult(input) }
-            let result = await control(host: input.host, socket: socket, operation: "cancel", port: port)
+            let result = await cancelForwardWithRetry(
+                host: input.host,
+                socket: socket,
+                port: port
+            )
             if Task.isCancelled { return cancelledCycleResult(input) }
             if result.status == 0 {
                 active.remove(port)
@@ -254,14 +261,44 @@ enum TunnelEngine {
                 if checkedPID == nil {
                     return connectionLostResult(input: input, result: result)
                 }
+                failedForwardingPorts.insert(port)
             }
         }
 
-        for port in active.intersection(remotePorts) {
+        let now = Date()
+        for port in Array(active.subtracting(discoveredPorts)) {
+            let missingAt = missingSince[port] ?? now
+            missingSince[port] = missingAt
+            guard now.timeIntervalSince(missingAt) >= disappearGrace else { continue }
+
+            if Task.isCancelled { return cancelledCycleResult(input) }
+            let result = await cancelForwardWithRetry(
+                host: input.host,
+                socket: socket,
+                port: port
+            )
+            if Task.isCancelled { return cancelledCycleResult(input) }
+            if result.status == 0 {
+                active.remove(port)
+                missingSince.removeValue(forKey: port)
+            } else {
+                let checkedPID = await checkMaster(host: input.host, socket: socket)
+                if Task.isCancelled {
+                    cancelDiscoveredMaster(checkedPID, socket: socket)
+                    return cancelledCycleResult(input)
+                }
+                if checkedPID == nil {
+                    return connectionLostResult(input: input, result: result)
+                }
+                failedForwardingPorts.insert(port)
+            }
+        }
+
+        for port in active.intersection(discoveredPorts) {
             missingSince.removeValue(forKey: port)
         }
 
-        for port in remotePorts.sorted() where !active.contains(port) {
+        for port in desiredPorts.sorted() where !active.contains(port) {
             if Task.isCancelled { return cancelledCycleResult(input) }
             guard active.count < forwardLimit else { break }
 
@@ -293,8 +330,8 @@ enum TunnelEngine {
         }
 
         let services = makeServices(
-            inventory: inventory,
-            remotePorts: remotePorts,
+            candidates: candidates,
+            forwardingPreferences: input.forwardingPreferences,
             active: active,
             conflicts: conflicts,
             localListeners: local
@@ -307,9 +344,14 @@ enum TunnelEngine {
             conflicts: conflicts,
             missingSince: missingSince,
             services: services,
-            remoteCount: remotePorts.count,
+            remoteCount: discoveredPorts.count,
             error: nil,
-            warning: combinedWarning(inventory.warningMessage, localSnapshot.warning),
+            warning: combinedWarning(
+                inventory.warningMessage,
+                localSnapshot.warning,
+                forwardingFailureWarning(for: failedForwardingPorts)
+            ),
+            failedForwardingPorts: failedForwardingPorts,
             shouldRetryAutomatically: true,
             hostKeyChanged: false
         )
@@ -501,6 +543,31 @@ enum TunnelEngine {
         )
     }
 
+    private static func cancelForwardWithRetry(
+        host: String,
+        socket: String,
+        port: Int
+    ) async -> CommandResult {
+        var result = await control(
+            host: host,
+            socket: socket,
+            operation: "cancel",
+            port: port
+        )
+        for attempt in 1..<3 where result.status != 0 {
+            if Task.isCancelled { return result }
+            try? await Task.sleep(for: .milliseconds(200 * attempt))
+            if Task.isCancelled { return result }
+            result = await control(
+                host: host,
+                socket: socket,
+                operation: "cancel",
+                port: port
+            )
+        }
+        return result
+    }
+
     private static func queryInventory(host: String, socket: String) async -> CommandResult {
         return await CommandRunner.runAsync(
             ssh,
@@ -568,8 +635,14 @@ enum TunnelEngine {
         )
     }
 
-    private static func combinedWarning(_ first: String?, _ second: String?) -> String? {
-        let warning = [first, second].compactMap { $0 }.joined(separator: " ")
+    private static func forwardingFailureWarning(for ports: Set<Int>) -> String? {
+        guard !ports.isEmpty else { return nil }
+        let list = ports.sorted().map(String.init).joined(separator: ", ")
+        return "Не удалось выключить проброс портов: \(list). Проверь SSH-соединение и повтори синхронизацию."
+    }
+
+    private static func combinedWarning(_ warnings: String?...) -> String? {
+        let warning = warnings.compactMap { $0 }.joined(separator: " ")
         return warning.isEmpty ? nil : warning
     }
 
@@ -581,15 +654,24 @@ enum TunnelEngine {
         RemoteInventoryParser.parse(output).sawSocketSection
     }
 
-    private static func eligibleRemotePorts(in inventory: RemoteInventory) -> Set<Int> {
-        RemoteServiceRecognitionPipeline(inventory: inventory).eligiblePorts
+    private static func serviceCandidates(
+        in inventory: RemoteInventory
+    ) -> [Int: RemoteServiceCandidate] {
+        let pipeline = RemoteServiceRecognitionPipeline(inventory: inventory)
+        return Dictionary(uniqueKeysWithValues: pipeline.eligiblePorts.map { port in
+            (port, pipeline.candidate(port: port))
+        })
     }
 
-    static func services(fromInventoryOutput output: String, activePorts: Set<Int> = []) -> [RemoteService] {
+    static func services(
+        fromInventoryOutput output: String,
+        activePorts: Set<Int> = [],
+        forwardingPreferences: [String: ServiceForwardingPreference] = [:]
+    ) -> [RemoteService] {
         let inventory = RemoteInventoryParser.parse(output)
         return makeServices(
-            inventory: inventory,
-            remotePorts: eligibleRemotePorts(in: inventory),
+            candidates: serviceCandidates(in: inventory),
+            forwardingPreferences: forwardingPreferences,
             active: activePorts,
             conflicts: [],
             localListeners: [:]
@@ -597,16 +679,16 @@ enum TunnelEngine {
     }
 
     private static func makeServices(
-        inventory: RemoteInventory,
-        remotePorts: Set<Int>,
+        candidates: [Int: RemoteServiceCandidate],
+        forwardingPreferences: [String: ServiceForwardingPreference],
         active: Set<Int>,
         conflicts: Set<Int>,
         localListeners: [Int: LocalListenerInfo]
     ) -> [RemoteService] {
-        let pipeline = RemoteServiceRecognitionPipeline(inventory: inventory)
-
-        return remotePorts.sorted().map { port in
-            let recognized = pipeline.recognize(port: port)
+        candidates.keys.sorted().compactMap { port -> RemoteService? in
+            guard let candidate = candidates[port] else { return nil }
+            let recognized = candidate.recognized
+            let preference = forwardingPreferences[candidate.forwardingKey] ?? .automatic
 
             return RemoteService(
                 port: port,
@@ -614,10 +696,20 @@ enum TunnelEngine {
                 group: recognized.group,
                 kind: recognized.kind,
                 details: recognized.details,
+                forwardingKey: candidate.forwardingKey,
+                defaultForwardingEnabled: candidate.defaultForwardingEnabled,
+                forwardingPreference: preference,
                 isForwarded: active.contains(port),
                 hasConflict: conflicts.contains(port),
                 conflictOwners: conflicts.contains(port) ? (localListeners[port]?.owners ?? []) : []
             )
         }
+    }
+
+    private static func forwardingEnabled(
+        for candidate: RemoteServiceCandidate,
+        preference: ServiceForwardingPreference
+    ) -> Bool {
+        preference.resolves(defaultEnabled: candidate.defaultForwardingEnabled)
     }
 }

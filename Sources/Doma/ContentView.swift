@@ -1,4 +1,48 @@
+import AppKit
 import SwiftUI
+
+private enum ServiceSegment: String, CaseIterable, Identifiable {
+    case active
+    case available
+    case excluded
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .active: "Активные"
+        case .available: "Доступные"
+        case .excluded: "Исключённые"
+        }
+    }
+
+    var emptyTitle: String {
+        switch self {
+        case .active: "Нет активных сервисов"
+        case .available: "Нет доступных сервисов"
+        case .excluded: "Нет исключённых сервисов"
+        }
+    }
+
+    var emptyDescription: String {
+        switch self {
+        case .active:
+            "Включи сервис в «Доступных» или верни исключённый сервис в автоматический режим."
+        case .available:
+            "Все найденные сервисы уже активны или исключены."
+        case .excluded:
+            "Здесь появятся сервисы, для которых проброс выключен вручную."
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .active: "network"
+        case .available: "plus.circle"
+        case .excluded: "nosign"
+        }
+    }
+}
 
 struct ContentView: View {
     @ObservedObject var manager: TunnelManager
@@ -6,19 +50,18 @@ struct ContentView: View {
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
     @State private var query = ""
+    @State private var selectedSegment: ServiceSegment = .active
     @State private var hoveredPort: Int?
     @State private var isHostMenuHovered = false
     @State private var collapsedGroups = Set<String>()
-    @State private var conflictResolutionRequest: RemoteService?
     @State private var dismissedConnectionError: String?
-    @State private var staleHostKeyRemovalRequested = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             overview
             connectionFailureBanner
-            searchField
+            serviceControls
             serviceList
             footer
         }
@@ -26,6 +69,7 @@ struct ContentView: View {
         .onAppear {
             launchAtLogin.refresh()
             updates.checkForUpdatesSilentlyIfNeeded()
+            presentPendingNativeErrors()
         }
         .onChange(of: manager.state) { _, state in
             if state == .connected {
@@ -35,46 +79,21 @@ struct ContentView: View {
         .onChange(of: manager.selectedHost) { _, _ in
             dismissedConnectionError = nil
         }
-        .alert(
-            "Забыть старый ключ \(manager.selectedHost)?",
-            isPresented: $staleHostKeyRemovalRequested
-        ) {
-            Button("Удалить и переподключиться", role: .destructive) {
-                manager.removeStaleHostKeyAndReconnect()
-            }
-            Button("Отмена", role: .cancel) {}
-        } message: {
-            Text("Doma сначала сохранит уникальные резервные копии всех затронутых пользовательских known_hosts, затем удалит прежние записи только для этого адреса. Для каждого файла сохраняются три последние успешные копии. При частичной ошибке Doma атомарно заменит каждый восстанавливаемый файл и постарается восстановить весь набор; общей атомарности между файлами нет. Незавершённая операция будет восстановлена при следующем запуске. Новый ключ не будет принят автоматически даже при accept-new/no в SSH config: SSH снова покажет fingerprint. Если смена неожиданна, сначала сверь его с администратором.")
-        }
-        .alert(
-            "Не удалось изменить автозапуск",
-            isPresented: launchAtLoginErrorBinding
-        ) {
-            Button("OK", role: .cancel) {
-                launchAtLogin.clearError()
-            }
-        } message: {
-            Text(launchAtLogin.errorMessage ?? "Неизвестная ошибка")
-        }
-        .alert(item: $conflictResolutionRequest) { service in
-            Alert(
-                title: Text("Освободить порт \(service.port)?"),
-                message: Text(conflictConfirmation(service)),
-                primaryButton: .destructive(Text("Завершить процесс")) {
-                    manager.resolveConflict(for: service)
-                },
-                secondaryButton: .cancel()
+        .onChange(of: launchAtLogin.errorMessage) { _, error in
+            guard let error else { return }
+            DomaNativeDialog.showError(
+                title: "Не удалось изменить автозапуск",
+                message: error
             )
+            launchAtLogin.clearError()
         }
-        .alert(
-            "Не удалось освободить порт",
-            isPresented: conflictResolutionErrorBinding
-        ) {
-            Button("OK", role: .cancel) {
-                manager.clearConflictResolutionError()
-            }
-        } message: {
-            Text(manager.conflictResolutionError ?? "Неизвестная ошибка")
+        .onChange(of: manager.conflictResolutionError) { _, error in
+            guard let error else { return }
+            DomaNativeDialog.showError(
+                title: "Не удалось освободить порт",
+                message: error
+            )
+            manager.clearConflictResolutionError()
         }
     }
 
@@ -170,7 +189,7 @@ struct ContentView: View {
     }
 
     private var overview: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 10) {
             metric(
                 value: manager.activeCount,
                 label: "проброшено",
@@ -178,8 +197,14 @@ struct ContentView: View {
             )
 
             metric(
+                value: manager.services.count(where: { !$0.isForwardingEnabled }),
+                label: "выключено",
+                color: .gray
+            )
+
+            metric(
                 value: manager.conflictCount,
-                label: "конфликтов",
+                label: conflictMetricLabel,
                 color: manager.conflictCount == 0 ? .gray : .orange
             )
 
@@ -194,6 +219,7 @@ struct ContentView: View {
         .background(Color.primary.opacity(0.035))
         .overlay(alignment: .bottom) {
             separator
+                .allowsHitTesting(false)
         }
     }
 
@@ -241,7 +267,7 @@ struct ContentView: View {
                     Spacer()
                     if manager.hostKeyChanged {
                         Button("Проверить ключ…") {
-                            staleHostKeyRemovalRequested = true
+                            confirmStaleHostKeyRemoval()
                         }
                     } else {
                         Button("Повторить") {
@@ -256,6 +282,7 @@ struct ContentView: View {
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(Color.red.opacity(0.16), lineWidth: 1)
+                    .allowsHitTesting(false)
             }
             .padding(.horizontal, 16)
             .padding(.top, 11)
@@ -284,16 +311,35 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .frame(height: 32)
         .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help("Поиск в разделе «\(selectedSegment.title)»")
+    }
+
+    private var serviceControls: some View {
+        VStack(spacing: 8) {
+            Picker("Раздел сервисов", selection: $selectedSegment) {
+                ForEach(ServiceSegment.allCases) { segment in
+                    Text("\(segment.title) \(serviceCount(in: segment))")
+                        .tag(segment)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .accessibilityLabel("Раздел сервисов")
+            .accessibilityValue(selectedSegment.title)
+
+            searchField
+        }
         .padding(.horizontal, 16)
-        .padding(.vertical, 11)
+        .padding(.vertical, 10)
     }
 
     private var serviceList: some View {
         Group {
             if filteredGroups.isEmpty {
                 ContentUnavailableView(
-                    query.isEmpty ? "Сервисы не найдены" : "Ничего не найдено",
-                    systemImage: query.isEmpty ? "network" : "magnifyingglass",
+                    emptyStateTitle,
+                    systemImage: query.isEmpty ? selectedSegment.symbol : "magnifyingglass",
                     description: Text(emptyStateDescription)
                 )
             } else {
@@ -380,6 +426,7 @@ struct ContentView: View {
         .frame(height: 38)
         .overlay(alignment: .top) {
             separator
+                .allowsHitTesting(false)
         }
     }
 
@@ -443,10 +490,17 @@ struct ContentView: View {
                     }
                     .frame(width: 26, height: 26)
 
-                    Text(service.name)
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(service.name)
+                            .font(.system(size: 13.5, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+
+                        Text(serviceForwardingSummary(service))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(serviceForwardingSummaryColor(service))
+                            .lineLimit(1)
+                    }
 
                     Spacer(minLength: 10)
 
@@ -458,29 +512,137 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity)
-            .disabled(!service.isForwarded)
+            .allowsHitTesting(service.isForwarded)
+            .focusable(service.isForwarded)
             .help(serviceHelp(service))
             .accessibilityLabel("\(service.name), порт \(service.port), \(serviceState(service))")
+            .accessibilityHidden(!service.isForwarded)
 
-            if hoveredPort == service.port && service.isForwarded {
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 12)
-            } else if service.hasConflict {
-                conflictResolutionButton(service)
-            } else {
-                statusMark(service)
-            }
+            serviceAccessory(service)
         }
         .padding(.horizontal, 7)
-        .frame(height: 38)
+        .frame(height: 44)
+        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .background {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(hoveredPort == service.port ? Color.primary.opacity(0.06) : .clear)
         }
         .onHover { isHovering in
             hoveredPort = isHovering ? service.port : nil
+        }
+        .contextMenu {
+            Button {
+                manager.setForwardingPreference(.automatic, for: service)
+            } label: {
+                Label(
+                    automaticForwardingMenuTitle(service),
+                    systemImage: service.forwardingPreference == .automatic
+                        ? "checkmark"
+                        : "arrow.uturn.backward"
+                )
+            }
+
+            Divider()
+
+            Button {
+                manager.setForwardingPreference(.included, for: service)
+            } label: {
+                Label(
+                    "Пробрасывать всегда",
+                    systemImage: service.forwardingPreference == .included
+                        ? "checkmark"
+                        : "network"
+                )
+            }
+
+            Button {
+                manager.setForwardingPreference(.excluded, for: service)
+            } label: {
+                Label(
+                    "Не пробрасывать",
+                    systemImage: service.forwardingPreference == .excluded
+                        ? "checkmark"
+                        : "network.slash"
+                )
+            }
+        }
+        .accessibilityAction(named: "Автоматический режим") {
+            manager.setForwardingPreference(.automatic, for: service)
+        }
+        .accessibilityAction(named: "Пробрасывать всегда") {
+            manager.setForwardingPreference(.included, for: service)
+        }
+        .accessibilityAction(named: "Не пробрасывать") {
+            manager.setForwardingPreference(.excluded, for: service)
+        }
+    }
+
+    @ViewBuilder
+    private func serviceAccessory(_ service: RemoteService) -> some View {
+        switch selectedSegment {
+        case .active:
+            activeServiceStatus(service)
+            excludeServiceButton(service)
+        case .available, .excluded:
+            includeServiceButton(service)
+        }
+    }
+
+    @ViewBuilder
+    private func activeServiceStatus(_ service: RemoteService) -> some View {
+        if manager.changingForwardingPorts.contains(service.port) {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 12, height: 12)
+                .help(service.isForwardingEnabled ? "Включаем проброс" : "Выключаем проброс")
+        } else if service.hasConflict {
+            conflictResolutionButton(service)
+        } else if hoveredPort == service.port && service.isForwarded {
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 12)
+        } else {
+            statusMark(service)
+        }
+    }
+
+    private func excludeServiceButton(_ service: RemoteService) -> some View {
+        Button {
+            manager.setForwardingPreference(.excluded, for: service)
+        } label: {
+            Image(systemName: "network.slash")
+                .font(.system(size: 10.5, weight: .semibold))
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .disabled(manager.changingForwardingPorts.contains(service.port))
+        .help("Исключить из проброса")
+        .accessibilityLabel("Исключить \(service.name) из проброса")
+    }
+
+    @ViewBuilder
+    private func includeServiceButton(_ service: RemoteService) -> some View {
+        if manager.changingForwardingPorts.contains(service.port) {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 24, height: 24)
+                .help("Изменяем проброс")
+        } else {
+            Button {
+                manager.setForwardingPreference(.included, for: service)
+            } label: {
+                Image(systemName: "network")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Пробрасывать порт \(service.port)")
+            .accessibilityLabel("Включить проброс \(service.name), порт \(service.port)")
         }
     }
 
@@ -493,14 +655,15 @@ struct ContentView: View {
                 .help("Завершаем локальный процесс")
         } else if canResolveConflict(service) {
             Button {
-                conflictResolutionRequest = service
+                confirmConflictResolution(service)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.orange)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
-            .controlSize(.mini)
             .help(conflictResolutionHelp(service))
             .accessibilityLabel("Освободить порт \(service.port)")
         } else {
@@ -538,6 +701,22 @@ struct ContentView: View {
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var conflictMetricLabel: String {
+        let remainder100 = manager.conflictCount % 100
+        if 11 ... 14 ~= remainder100 {
+            return "конфликтов"
+        }
+        switch manager.conflictCount % 10 {
+        case 1:
+            return "конфликт"
+        case 2 ... 4:
+            return "конфликта"
+        default:
+            return "конфликтов"
         }
     }
 
@@ -555,46 +734,46 @@ struct ContentView: View {
 
     private var filteredGroups: [(String, [RemoteService])] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return manager.groupedServices }
-
         return manager.groupedServices.compactMap { group, services in
             let filtered = services.filter { service in
-                service.name.lowercased().contains(needle)
-                    || service.group.lowercased().contains(needle)
-                    || service.details.lowercased().contains(needle)
-                    || String(service.port).contains(needle)
-                    || service.kind.title.lowercased().contains(needle)
+                serviceBelongsToSelectedSegment(service)
+                    && (needle.isEmpty || serviceMatchesSearch(service, needle: needle))
             }
             return filtered.isEmpty ? nil : (group, filtered)
         }
+    }
+
+    private func serviceCount(in segment: ServiceSegment) -> Int {
+        manager.services.count(where: { serviceBelongs($0, to: segment) })
+    }
+
+    private func serviceBelongsToSelectedSegment(_ service: RemoteService) -> Bool {
+        serviceBelongs(service, to: selectedSegment)
+    }
+
+    private func serviceBelongs(_ service: RemoteService, to segment: ServiceSegment) -> Bool {
+        switch segment {
+        case .active:
+            service.isForwardingEnabled
+        case .available:
+            service.forwardingPreference == .automatic && !service.defaultForwardingEnabled
+        case .excluded:
+            service.forwardingPreference == .excluded
+        }
+    }
+
+    private func serviceMatchesSearch(_ service: RemoteService, needle: String) -> Bool {
+        service.name.lowercased().contains(needle)
+            || service.group.lowercased().contains(needle)
+            || service.details.lowercased().contains(needle)
+            || String(service.port).contains(needle)
+            || service.kind.title.lowercased().contains(needle)
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
         Binding(
             get: { launchAtLogin.isEnabled },
             set: { launchAtLogin.setEnabled($0) }
-        )
-    }
-
-    private var launchAtLoginErrorBinding: Binding<Bool> {
-        Binding(
-            get: { launchAtLogin.errorMessage != nil },
-            set: { isPresented in
-                if !isPresented {
-                    launchAtLogin.clearError()
-                }
-            }
-        )
-    }
-
-    private var conflictResolutionErrorBinding: Binding<Bool> {
-        Binding(
-            get: { manager.conflictResolutionError != nil },
-            set: { isPresented in
-                if !isPresented {
-                    manager.clearConflictResolutionError()
-                }
-            }
         )
     }
 
@@ -627,13 +806,23 @@ struct ContentView: View {
         return .secondary
     }
 
-    private var emptyStateDescription: String {
-        if !query.isEmpty {
-            return "Попробуй изменить запрос"
+    private var emptyStateTitle: String {
+        if manager.services.isEmpty, manager.state != .connected {
+            return manager.state == .connecting ? "Подключаемся…" : "Сервисы недоступны"
         }
-        return manager.state == .connected
-            ? "На сервере нет поддерживаемых TCP-сервисов"
-            : "Выбери SSH сервер и подключись"
+        return query.isEmpty ? selectedSegment.emptyTitle : "Нет совпадений"
+    }
+
+    private var emptyStateDescription: String {
+        if manager.services.isEmpty, manager.state != .connected {
+            return manager.state == .connecting
+                ? "Сервисы появятся после подключения"
+                : "Выбери SSH сервер и подключись"
+        }
+        if !query.isEmpty {
+            return "В разделе «\(selectedSegment.title)» ничего не найдено. Измени запрос или выбери другой раздел."
+        }
+        return selectedSegment.emptyDescription
     }
 
     private var lastSyncText: String {
@@ -671,8 +860,45 @@ struct ContentView: View {
     private func serviceHelp(_ service: RemoteService) -> String {
         let action = service.isForwarded
             ? "Открыть http://127.0.0.1:\(service.port)/"
-            : "Порт не проброшен"
+            : service.isForwardingEnabled
+                ? "Порт выбран, но ещё не проброшен"
+                : "Проброс выключен"
         return service.details.isEmpty ? action : "\(service.details)\n\(action)"
+    }
+
+    private func serviceForwardingSummary(_ service: RemoteService) -> String {
+        if manager.changingForwardingPorts.contains(service.port) {
+            return service.isForwardingEnabled ? "Включаем…" : "Выключаем…"
+        }
+        if service.hasConflict {
+            return "Конфликт локального порта"
+        }
+
+        switch service.forwardingPreference {
+        case .automatic:
+            if !service.isForwardingEnabled {
+                return "Авто · выключен"
+            }
+            return service.isForwarded ? "Авто · проброшен" : "Авто · ожидает проброса"
+        case .included:
+            return service.isForwarded ? "Включён вручную" : "Вручную · ожидает проброса"
+        case .excluded:
+            return "Выключен вручную"
+        }
+    }
+
+    private func serviceForwardingSummaryColor(_ service: RemoteService) -> Color {
+        if service.hasConflict {
+            return .orange
+        }
+        if service.isForwarded {
+            return .secondary
+        }
+        return Color.secondary.opacity(0.65)
+    }
+
+    private func automaticForwardingMenuTitle(_ service: RemoteService) -> String {
+        "Автоматически — \(service.defaultForwardingEnabled ? "включать" : "не включать")"
     }
 
     private func canResolveConflict(_ service: RemoteService) -> Bool {
@@ -695,6 +921,52 @@ struct ContentView: View {
             + "Несохранённые данные этого приложения могут быть потеряны."
     }
 
+    private func confirmConflictResolution(_ service: RemoteService) {
+        guard DomaNativeDialog.confirmDestructive(
+            title: "Освободить порт \(service.port)?",
+            message: conflictConfirmation(service),
+            actionTitle: "Завершить процесс"
+        ) else { return }
+
+        manager.resolveConflict(for: service)
+    }
+
+    private func confirmStaleHostKeyRemoval() {
+        let message = "Doma сначала сохранит уникальные резервные копии всех затронутых "
+            + "пользовательских known_hosts, затем удалит прежние записи только для этого адреса. "
+            + "Для каждого файла сохраняются три последние успешные копии. При частичной ошибке "
+            + "Doma атомарно заменит каждый восстанавливаемый файл и постарается восстановить весь "
+            + "набор; общей атомарности между файлами нет. Незавершённая операция будет восстановлена "
+            + "при следующем запуске. Новый ключ не будет принят автоматически даже при accept-new/no "
+            + "в SSH config: SSH снова покажет fingerprint. Если смена неожиданна, сначала сверь его "
+            + "с администратором."
+
+        guard DomaNativeDialog.confirmDestructive(
+            title: "Забыть старый ключ \(manager.selectedHost)?",
+            message: message,
+            actionTitle: "Удалить и переподключиться"
+        ) else { return }
+
+        manager.removeStaleHostKeyAndReconnect()
+    }
+
+    private func presentPendingNativeErrors() {
+        if let error = launchAtLogin.errorMessage {
+            DomaNativeDialog.showError(
+                title: "Не удалось изменить автозапуск",
+                message: error
+            )
+            launchAtLogin.clearError()
+        }
+        if let error = manager.conflictResolutionError {
+            DomaNativeDialog.showError(
+                title: "Не удалось освободить порт",
+                message: error
+            )
+            manager.clearConflictResolutionError()
+        }
+    }
+
     private func conflictOwnerNames(_ service: RemoteService) -> String {
         service.conflictOwners
             .map { "\($0.name) (PID \($0.pid))" }
@@ -702,8 +974,12 @@ struct ContentView: View {
     }
 
     private func serviceState(_ service: RemoteService) -> String {
+        if manager.changingForwardingPorts.contains(service.port) {
+            return service.isForwardingEnabled ? "включается" : "выключается"
+        }
         if service.hasConflict { return "конфликт" }
-        return service.isForwarded ? "проброшен" : "не проброшен"
+        if !service.isForwardingEnabled { return "выключен" }
+        return service.isForwarded ? "проброшен" : "ожидает проброса"
     }
 
     private var statusColor: Color {
@@ -713,6 +989,42 @@ struct ContentView: View {
         case .failed: .red
         case .disconnected: .gray
         }
+    }
+}
+
+@MainActor
+private enum DomaNativeDialog {
+    static func confirmDestructive(
+        title: String,
+        message: String,
+        actionTitle: String
+    ) -> Bool {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+
+        let destructiveButton = alert.addButton(withTitle: actionTitle)
+        destructiveButton.hasDestructiveAction = true
+        destructiveButton.keyEquivalent = ""
+
+        let cancelButton = alert.addButton(withTitle: "Отмена")
+        cancelButton.keyEquivalent = "\u{1b}"
+
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    static func showError(title: String, message: String) {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 
