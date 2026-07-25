@@ -20,8 +20,10 @@ final class TunnelManager: ObservableObject {
     @Published private(set) var lastSync: Date?
     @Published private(set) var isSyncing = false
     @Published private(set) var resolvingPorts = Set<Int>()
+    @Published private(set) var changingForwardingPorts = Set<Int>()
     @Published private(set) var conflictResolutionError: String?
 
+    private let forwardingPolicyStore: ServiceForwardingPolicyStore
     private var masterPID: Int?
     private var activeForwards = Set<Int>()
     private var missingSince: [Int: Date] = [:]
@@ -50,8 +52,10 @@ final class TunnelManager: ObservableObject {
         preview: Bool = false,
         previewConnectionError: Bool = false,
         previewHostKeyChanged: Bool = false,
-        previewRemotePermissionError: Bool = false
+        previewRemotePermissionError: Bool = false,
+        forwardingPolicyStore: ServiceForwardingPolicyStore = .standard
     ) {
+        self.forwardingPolicyStore = forwardingPolicyStore
         #if DEBUG
         if preview {
             loadPreviewState()
@@ -109,6 +113,7 @@ final class TunnelManager: ObservableObject {
                 group: "~/Projects/atlas",
                 kind: .vite,
                 details: "vite --host 127.0.0.1",
+                forwardingKey: "preview-vite",
                 isForwarded: true,
                 hasConflict: false,
                 conflictOwners: []
@@ -119,6 +124,7 @@ final class TunnelManager: ObservableObject {
                 group: "~/Projects/atlas",
                 kind: .python,
                 details: "python3 -m http.server",
+                forwardingKey: "preview-python",
                 isForwarded: false,
                 hasConflict: true,
                 conflictOwners: [
@@ -136,6 +142,7 @@ final class TunnelManager: ObservableObject {
                 group: "atlas-compose",
                 kind: .docker,
                 details: "atlas-root-front",
+                forwardingKey: "preview-root-front",
                 isForwarded: true,
                 hasConflict: false,
                 conflictOwners: []
@@ -146,6 +153,7 @@ final class TunnelManager: ObservableObject {
                 group: "atlas-compose",
                 kind: .docker,
                 details: "atlas-document",
+                forwardingKey: "preview-document",
                 isForwarded: true,
                 hasConflict: false,
                 conflictOwners: []
@@ -156,7 +164,20 @@ final class TunnelManager: ObservableObject {
                 group: "atlas-compose",
                 kind: .docker,
                 details: "atlas-spreadsheet",
+                forwardingKey: "preview-spreadsheet",
                 isForwarded: true,
+                hasConflict: false,
+                conflictOwners: []
+            ),
+            RemoteService(
+                port: 43875,
+                name: "arc",
+                group: "~/",
+                kind: .process,
+                details: "arc helper-daemon start --foreground",
+                forwardingKey: "preview-arc",
+                defaultForwardingEnabled: false,
+                isForwarded: false,
                 hasConflict: false,
                 conflictOwners: []
             ),
@@ -249,6 +270,30 @@ final class TunnelManager: ObservableObject {
               let url = URL(string: "http://127.0.0.1:\(service.port)/")
         else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func setForwardingPreference(
+        _ preference: ServiceForwardingPreference,
+        for service: RemoteService
+    ) {
+        guard !selectedHost.isEmpty,
+              !service.forwardingKey.isEmpty,
+              service.forwardingPreference != preference,
+              !isShuttingDown
+        else {
+            return
+        }
+
+        forwardingPolicyStore.set(
+            preference,
+            for: service.forwardingKey,
+            host: selectedHost
+        )
+        if let index = services.firstIndex(where: { $0.port == service.port }) {
+            services[index].forwardingPreference = preference
+        }
+        changingForwardingPorts.insert(service.port)
+        requestSync()
     }
 
     func quit() {
@@ -541,7 +586,8 @@ final class TunnelManager: ObservableObject {
                 host: host,
                 previousMasterPID: masterPID,
                 activeForwards: activeForwards,
-                missingSince: missingSince
+                missingSince: missingSince,
+                forwardingPreferences: forwardingPolicyStore.preferences(for: host)
             )
             let result = await TunnelEngine.cycle(input)
             guard !Task.isCancelled,
@@ -558,6 +604,13 @@ final class TunnelManager: ObservableObject {
         activeForwards = result.activeForwards
         missingSince = result.missingSince
         services = result.services
+        let savedPreferences = forwardingPolicyStore.preferences(for: host)
+        let servicesByPort = Dictionary(uniqueKeysWithValues: result.services.map { ($0.port, $0) })
+        changingForwardingPorts = changingForwardingPorts.filter { port in
+            guard let service = servicesByPort[port] else { return false }
+            let saved = savedPreferences[service.forwardingKey] ?? .automatic
+            return service.forwardingPreference != saved
+        }
         state = result.state
         activeCount = result.activeForwards.count
         if !result.forwardingStateIsAuthoritative {
@@ -664,6 +717,7 @@ final class TunnelManager: ObservableObject {
         activeForwards = []
         missingSince = [:]
         services = []
+        changingForwardingPorts = []
         activeCount = 0
         conflictCount = 0
         remoteCount = 0

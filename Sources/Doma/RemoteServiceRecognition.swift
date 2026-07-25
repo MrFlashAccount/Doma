@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct RecognizedRemoteService {
@@ -5,6 +6,12 @@ struct RecognizedRemoteService {
     let name: String
     let group: String
     let details: String
+}
+
+struct RemoteServiceCandidate {
+    let recognized: RecognizedRemoteService
+    let forwardingKey: String
+    let defaultForwardingEnabled: Bool
 }
 
 protocol RemoteServiceRecognizing {
@@ -67,6 +74,7 @@ struct RemoteServiceRecognitionPipeline {
             DockerRemoteServiceRecognizer(),
             HermesRemoteServiceRecognizer(),
             KubernetesPortForwardRemoteServiceRecognizer(),
+            KubernetesProxyRemoteServiceRecognizer(),
             SystemRemoteServiceRecognizer(),
             ViteRemoteServiceRecognizer(),
             JavaScriptRuntimeRemoteServiceRecognizer(),
@@ -83,13 +91,80 @@ struct RemoteServiceRecognitionPipeline {
     }
 
     func recognize(port: Int) -> RecognizedRemoteService {
+        candidate(port: port).recognized
+    }
+
+    func candidate(port: Int) -> RemoteServiceCandidate {
         let context = makeContext(port: port)
         for recognizer in recognizers {
             if let service = recognizer.recognize(context) {
-                return service
+                return RemoteServiceCandidate(
+                    recognized: service,
+                    forwardingKey: forwardingKey(for: service, context: context),
+                    defaultForwardingEnabled: defaultForwardingEnabled(
+                        for: service,
+                        port: port
+                    )
+                )
             }
         }
         preconditionFailure("GenericProcessRemoteServiceRecognizer must terminate the pipeline")
+    }
+
+    private func defaultForwardingEnabled(
+        for service: RecognizedRemoteService,
+        port: Int
+    ) -> Bool {
+        if 1024...32767 ~= port {
+            return true
+        }
+        switch service.kind {
+        case .docker, .hermes, .kubernetes, .minikube, .vite, .node, .python, .zrok:
+            return true
+        case .process, .system:
+            return false
+        }
+    }
+
+    private func forwardingKey(
+        for service: RecognizedRemoteService,
+        context: RemoteServiceRecognitionContext
+    ) -> String {
+        let normalizedArguments = context.process.map {
+            normalizePort(in: $0.arguments, port: context.port)
+        }
+        let docker = context.docker
+        var components = [
+            service.kind.rawValue,
+            service.name,
+            service.group,
+            context.process?.command,
+            normalizedArguments,
+            context.cwd,
+            context.listener?.command,
+            docker?.project,
+            docker?.service,
+            docker?.container,
+            docker?.image,
+        ].compactMap { $0 }
+
+        let hasStableMetadata = context.process != nil
+            || context.listener?.command != nil
+            || docker != nil
+        if !hasStableMetadata {
+            components.append("port:\(context.port)")
+        }
+
+        let digest = SHA256.hash(data: Data(components.joined(separator: "\u{1f}").utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func normalizePort(in arguments: String, port: Int) -> String {
+        arguments.replacingOccurrences(
+            of: #"(?<!\d)"# + String(port) + #"(?!\d)"#,
+            with: "{port}",
+            options: .regularExpression
+        )
     }
 
     private func makeContext(port: Int) -> RemoteServiceRecognitionContext {

@@ -68,6 +68,23 @@ enum ServiceKind: String, Sendable {
     }
 }
 
+enum ServiceForwardingPreference: String, Codable, Sendable {
+    case automatic
+    case included
+    case excluded
+
+    func resolves(defaultEnabled: Bool) -> Bool {
+        switch self {
+        case .automatic:
+            defaultEnabled
+        case .included:
+            true
+        case .excluded:
+            false
+        }
+    }
+}
+
 struct SSHHost: Identifiable, Hashable, Sendable {
     let alias: String
 
@@ -80,11 +97,44 @@ struct RemoteService: Identifiable, Hashable, Sendable {
     let group: String
     let kind: ServiceKind
     let details: String
+    let forwardingKey: String
+    let defaultForwardingEnabled: Bool
+    var forwardingPreference: ServiceForwardingPreference
     let isForwarded: Bool
     let hasConflict: Bool
     let conflictOwners: [LocalPortOwner]
 
+    init(
+        port: Int,
+        name: String,
+        group: String,
+        kind: ServiceKind,
+        details: String,
+        forwardingKey: String = "",
+        defaultForwardingEnabled: Bool = true,
+        forwardingPreference: ServiceForwardingPreference = .automatic,
+        isForwarded: Bool,
+        hasConflict: Bool,
+        conflictOwners: [LocalPortOwner]
+    ) {
+        self.port = port
+        self.name = name
+        self.group = group
+        self.kind = kind
+        self.details = details
+        self.forwardingKey = forwardingKey
+        self.defaultForwardingEnabled = defaultForwardingEnabled
+        self.forwardingPreference = forwardingPreference
+        self.isForwarded = isForwarded
+        self.hasConflict = hasConflict
+        self.conflictOwners = conflictOwners
+    }
+
     var id: Int { port }
+
+    var isForwardingEnabled: Bool {
+        forwardingPreference.resolves(defaultEnabled: defaultForwardingEnabled)
+    }
 }
 
 struct LocalPortOwner: Identifiable, Hashable, Sendable {
@@ -102,6 +152,21 @@ struct CycleInput: Sendable {
     let previousMasterPID: Int?
     let activeForwards: Set<Int>
     let missingSince: [Int: Date]
+    let forwardingPreferences: [String: ServiceForwardingPreference]
+
+    init(
+        host: String,
+        previousMasterPID: Int?,
+        activeForwards: Set<Int>,
+        missingSince: [Int: Date],
+        forwardingPreferences: [String: ServiceForwardingPreference] = [:]
+    ) {
+        self.host = host
+        self.previousMasterPID = previousMasterPID
+        self.activeForwards = activeForwards
+        self.missingSince = missingSince
+        self.forwardingPreferences = forwardingPreferences
+    }
 }
 
 struct CycleResult: Sendable {

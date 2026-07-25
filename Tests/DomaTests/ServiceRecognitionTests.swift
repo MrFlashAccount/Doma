@@ -59,11 +59,14 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(byPort[12000]).name, "root-front")
         XCTAssertEqual(try XCTUnwrap(byPort[32773]).kind, .minikube)
         XCTAssertEqual(try XCTUnwrap(byPort[32773]).name, "Minikube SSH")
-        XCTAssertEqual(try XCTUnwrap(byPort[40000]).kind, .process)
-        XCTAssertEqual(try XCTUnwrap(byPort[40000]).name, "code")
+        let unknownEphemeral = try XCTUnwrap(byPort[40000])
+        XCTAssertEqual(unknownEphemeral.kind, .process)
+        XCTAssertEqual(unknownEphemeral.name, "code")
+        XCTAssertFalse(unknownEphemeral.defaultForwardingEnabled)
+        XCTAssertFalse(unknownEphemeral.isForwardingEnabled)
     }
 
-    func testIncludesEphemeralKubectlProxyPort() throws {
+    func testRecognizesEphemeralKubectlProxyAndEnablesItAutomatically() throws {
         let output = """
         __USER__
         501
@@ -71,7 +74,7 @@ final class ServiceRecognitionTests: XCTestCase {
         LISTEN 0 4096 127.0.0.1:42081 0.0.0.0:* users:(("kubectl",pid=330,fd=7)) uid:501 ino:21
         __DOCKER__
         __PS__
-        330 1 501 demo kubectl kubectl proxy --port=42081
+        330 1 501 demo kubectl kubectl --context dev proxy --port=42081
         __CWD__
         """
 
@@ -80,8 +83,71 @@ final class ServiceRecognitionTests: XCTestCase {
         )
 
         XCTAssertEqual(service.port, 42081)
-        XCTAssertEqual(service.kind, .process)
-        XCTAssertEqual(service.name, "kubectl")
+        XCTAssertEqual(service.kind, .kubernetes)
+        XCTAssertEqual(service.name, "Kubernetes API Proxy")
+        XCTAssertEqual(service.group, "Kubernetes · dev")
+        XCTAssertTrue(service.defaultForwardingEnabled)
+        XCTAssertTrue(service.isForwardingEnabled)
+    }
+
+    func testUserPreferencesOverrideKnownAndUnknownDefaults() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 4096 127.0.0.1:42081 0.0.0.0:* users:(("kubectl",pid=330,fd=7)) uid:501 ino:21
+        LISTEN 0 4096 127.0.0.1:43875 0.0.0.0:* users:(("arc",pid=331,fd=8)) uid:501 ino:22
+        __DOCKER__
+        __PS__
+        330 1 501 demo kubectl kubectl proxy --port=42081
+        331 1 501 demo arc /home/demo/.arc/releases/current/arc helper-daemon start --foreground
+        __CWD__
+        """
+
+        let automatic = TunnelEngine.services(fromInventoryOutput: output)
+        let automaticByPort = Dictionary(uniqueKeysWithValues: automatic.map { ($0.port, $0) })
+        let proxy = try XCTUnwrap(automaticByPort[42081])
+        let arc = try XCTUnwrap(automaticByPort[43875])
+        XCTAssertTrue(proxy.isForwardingEnabled)
+        XCTAssertFalse(arc.isForwardingEnabled)
+
+        let overridden = TunnelEngine.services(
+            fromInventoryOutput: output,
+            forwardingPreferences: [
+                proxy.forwardingKey: .excluded,
+                arc.forwardingKey: .included,
+            ]
+        )
+        let overriddenByPort = Dictionary(uniqueKeysWithValues: overridden.map { ($0.port, $0) })
+        XCTAssertFalse(try XCTUnwrap(overriddenByPort[42081]).isForwardingEnabled)
+        XCTAssertEqual(try XCTUnwrap(overriddenByPort[42081]).forwardingPreference, .excluded)
+        XCTAssertTrue(try XCTUnwrap(overriddenByPort[43875]).isForwardingEnabled)
+        XCTAssertEqual(try XCTUnwrap(overriddenByPort[43875]).forwardingPreference, .included)
+    }
+
+    func testForwardingKeySurvivesAnEphemeralPortChange() throws {
+        func inventory(port: Int) -> String {
+            """
+            __USER__
+            501
+            __SS__
+            LISTEN 0 4096 127.0.0.1:\(port) 0.0.0.0:* users:(("code",pid=330,fd=7)) uid:501 ino:21
+            __DOCKER__
+            __PS__
+            330 1 501 demo code code tunnel --on-port \(port)
+            __CWD__
+            330|/home/demo/project
+            """
+        }
+
+        let first = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: inventory(port: 40000)).first
+        )
+        let second = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: inventory(port: 45000)).first
+        )
+
+        XCTAssertEqual(first.forwardingKey, second.forwardingKey)
     }
 
     func testInfersUniqueProcessFromUIDAndPortWhenSSCannotExposePID() throws {
