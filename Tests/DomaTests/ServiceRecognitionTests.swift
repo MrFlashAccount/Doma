@@ -279,6 +279,31 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertTrue(service.details.contains("19012 → 9010"))
     }
 
+    func testKubectlPortForwardSkipsAddressOptionBeforeResource() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 4096 127.0.0.1:30080 0.0.0.0:* users:(("kubectl",pid=330,fd=7)) uid:501 ino:21
+        __DOCKER__
+        __PS__
+        330 1 501 demo kubectl /usr/local/bin/kubectl --context transformator-poc --namespace kubernetes-dashboard port-forward --address 127.0.0.1 service/kubernetes-dashboard-local 30080:80
+        __CWD__
+        """
+
+        let service = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: output).first
+        )
+
+        XCTAssertEqual(service.name, "kubernetes-dashboard-local")
+        XCTAssertEqual(
+            service.group,
+            "Kubernetes · transformator-poc / kubernetes-dashboard"
+        )
+        XCTAssertTrue(service.details.contains("service"))
+        XCTAssertTrue(service.details.contains("30080 → 80"))
+    }
+
     func testKubectlPortForwardDoesNotInventDefaultNamespace() throws {
         let output = """
         __USER__
