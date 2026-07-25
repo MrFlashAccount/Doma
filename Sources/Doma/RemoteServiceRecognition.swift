@@ -116,6 +116,9 @@ struct RemoteServiceRecognitionPipeline {
         for service: RecognizedRemoteService,
         port: Int
     ) -> Bool {
+        if service.kind == .system {
+            return false
+        }
         if 1024...32767 ~= port {
             return true
         }
