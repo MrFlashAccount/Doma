@@ -304,6 +304,28 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertTrue(service.details.contains("30080 → 80"))
     }
 
+    func testKubectlPortForwardSkipsInheritedPathOptionsBeforeResource() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:* users:(("kubectl",pid=331,fd=7)) uid:501 ino:22
+        __DOCKER__
+        __PS__
+        331 1 501 demo kubectl /usr/local/bin/kubectl port-forward --certificate-authority /etc/kubernetes/ca.crt --client-certificate /etc/kubernetes/client.crt --client-key /etc/kubernetes/client.key service/api 8080:80
+        __CWD__
+        """
+
+        let service = try XCTUnwrap(
+            TunnelEngine.services(fromInventoryOutput: output).first
+        )
+
+        XCTAssertEqual(service.name, "api")
+        XCTAssertEqual(service.group, "Kubernetes")
+        XCTAssertTrue(service.details.contains("service"))
+        XCTAssertTrue(service.details.contains("8080 → 80"))
+    }
+
     func testKubectlPortForwardDoesNotInventDefaultNamespace() throws {
         let output = """
         __USER__
