@@ -179,6 +179,7 @@ struct CycleResult: Sendable {
     let remoteCount: Int
     let error: String?
     let warning: String?
+    let failedForwardingPorts: Set<Int>
     let shouldRetryAutomatically: Bool
     let hostKeyChanged: Bool
     let forwardingStateIsAuthoritative: Bool
@@ -193,6 +194,7 @@ struct CycleResult: Sendable {
         remoteCount: Int,
         error: String?,
         warning: String?,
+        failedForwardingPorts: Set<Int> = [],
         shouldRetryAutomatically: Bool,
         hostKeyChanged: Bool,
         forwardingStateIsAuthoritative: Bool = true
@@ -206,6 +208,7 @@ struct CycleResult: Sendable {
         self.remoteCount = remoteCount
         self.error = error
         self.warning = warning
+        self.failedForwardingPorts = failedForwardingPorts
         self.shouldRetryAutomatically = shouldRetryAutomatically
         self.hostKeyChanged = hostKeyChanged
         self.forwardingStateIsAuthoritative = forwardingStateIsAuthoritative

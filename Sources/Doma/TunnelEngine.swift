@@ -233,6 +233,7 @@ enum TunnelEngine {
         var active = input.previousMasterPID == masterPID ? input.activeForwards : []
         var conflicts = Set<Int>()
         var missingSince = input.previousMasterPID == masterPID ? input.missingSince : [:]
+        var failedForwardingPorts = Set<Int>()
 
         for port in Array(active) where !ownsForward(port: port, masterPID: masterPID, listeners: local) {
             if Task.isCancelled { return cancelledCycleResult(input) }
@@ -242,7 +243,11 @@ enum TunnelEngine {
 
         for port in Array(active.subtracting(desiredPorts).intersection(discoveredPorts)) {
             if Task.isCancelled { return cancelledCycleResult(input) }
-            let result = await control(host: input.host, socket: socket, operation: "cancel", port: port)
+            let result = await cancelForwardWithRetry(
+                host: input.host,
+                socket: socket,
+                port: port
+            )
             if Task.isCancelled { return cancelledCycleResult(input) }
             if result.status == 0 {
                 active.remove(port)
@@ -256,6 +261,7 @@ enum TunnelEngine {
                 if checkedPID == nil {
                     return connectionLostResult(input: input, result: result)
                 }
+                failedForwardingPorts.insert(port)
             }
         }
 
@@ -266,7 +272,11 @@ enum TunnelEngine {
             guard now.timeIntervalSince(missingAt) >= disappearGrace else { continue }
 
             if Task.isCancelled { return cancelledCycleResult(input) }
-            let result = await control(host: input.host, socket: socket, operation: "cancel", port: port)
+            let result = await cancelForwardWithRetry(
+                host: input.host,
+                socket: socket,
+                port: port
+            )
             if Task.isCancelled { return cancelledCycleResult(input) }
             if result.status == 0 {
                 active.remove(port)
@@ -280,6 +290,7 @@ enum TunnelEngine {
                 if checkedPID == nil {
                     return connectionLostResult(input: input, result: result)
                 }
+                failedForwardingPorts.insert(port)
             }
         }
 
@@ -335,7 +346,12 @@ enum TunnelEngine {
             services: services,
             remoteCount: discoveredPorts.count,
             error: nil,
-            warning: combinedWarning(inventory.warningMessage, localSnapshot.warning),
+            warning: combinedWarning(
+                inventory.warningMessage,
+                localSnapshot.warning,
+                forwardingFailureWarning(for: failedForwardingPorts)
+            ),
+            failedForwardingPorts: failedForwardingPorts,
             shouldRetryAutomatically: true,
             hostKeyChanged: false
         )
@@ -527,6 +543,31 @@ enum TunnelEngine {
         )
     }
 
+    private static func cancelForwardWithRetry(
+        host: String,
+        socket: String,
+        port: Int
+    ) async -> CommandResult {
+        var result = await control(
+            host: host,
+            socket: socket,
+            operation: "cancel",
+            port: port
+        )
+        for attempt in 1..<3 where result.status != 0 {
+            if Task.isCancelled { return result }
+            try? await Task.sleep(for: .milliseconds(200 * attempt))
+            if Task.isCancelled { return result }
+            result = await control(
+                host: host,
+                socket: socket,
+                operation: "cancel",
+                port: port
+            )
+        }
+        return result
+    }
+
     private static func queryInventory(host: String, socket: String) async -> CommandResult {
         return await CommandRunner.runAsync(
             ssh,
@@ -594,8 +635,14 @@ enum TunnelEngine {
         )
     }
 
-    private static func combinedWarning(_ first: String?, _ second: String?) -> String? {
-        let warning = [first, second].compactMap { $0 }.joined(separator: " ")
+    private static func forwardingFailureWarning(for ports: Set<Int>) -> String? {
+        guard !ports.isEmpty else { return nil }
+        let list = ports.sorted().map(String.init).joined(separator: ", ")
+        return "Не удалось выключить проброс портов: \(list). Проверь SSH-соединение и повтори синхронизацию."
+    }
+
+    private static func combinedWarning(_ warnings: String?...) -> String? {
+        let warning = warnings.compactMap { $0 }.joined(separator: " ")
         return warning.isEmpty ? nil : warning
     }
 

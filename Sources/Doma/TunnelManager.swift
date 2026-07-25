@@ -609,7 +609,8 @@ final class TunnelManager: ObservableObject {
         changingForwardingPorts = changingForwardingPorts.filter { port in
             guard let service = servicesByPort[port] else { return false }
             let saved = savedPreferences[service.forwardingKey] ?? .automatic
-            return service.forwardingPreference != saved
+            return result.failedForwardingPorts.contains(port)
+                || service.forwardingPreference != saved
         }
         state = result.state
         activeCount = result.activeForwards.count

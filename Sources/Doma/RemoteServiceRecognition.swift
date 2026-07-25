@@ -27,6 +27,7 @@ struct RemoteServiceRecognitionContext {
     let port: Int
     let inventory: RemoteInventory
     let listener: RemoteListenerRecord?
+    let processID: Int?
     let process: RemoteProcessRecord?
     let processChain: [RemoteProcessRecord]
     let cwd: String?
@@ -130,10 +131,29 @@ struct RemoteServiceRecognitionPipeline {
         for service: RecognizedRemoteService,
         context: RemoteServiceRecognitionContext
     ) -> String {
+        if let docker = context.docker {
+            var components = [service.kind.rawValue, "docker"]
+            if !docker.project.isEmpty, !docker.service.isEmpty {
+                components.append(contentsOf: [
+                    "project:\(docker.project)",
+                    "service:\(docker.service)",
+                    "container:\(docker.container)",
+                ])
+            } else {
+                components.append("container:\(docker.container)")
+            }
+            if let containerPort = docker.containerPort {
+                components.append("container-port:\(containerPort)")
+            }
+            return digest(components)
+        }
+
         let normalizedArguments = context.process.map {
             normalizePort(in: $0.arguments, port: context.port)
         }
-        let docker = context.docker
+        let argumentsContainPort = context.process.map {
+            normalizePort(in: $0.arguments, port: context.port) != $0.arguments
+        } ?? false
         var components = [
             service.kind.rawValue,
             service.name,
@@ -142,19 +162,24 @@ struct RemoteServiceRecognitionPipeline {
             normalizedArguments,
             context.cwd,
             context.listener?.command,
-            docker?.project,
-            docker?.service,
-            docker?.container,
-            docker?.image,
         ].compactMap { $0 }
 
         let hasStableMetadata = context.process != nil
-            || context.listener?.command != nil
-            || docker != nil
-        if !hasStableMetadata {
+        let sharedProcessPorts = context.processID.map { processID in
+            Set(
+                inventory.listeners.lazy
+                    .filter { $0.pid == processID }
+                    .map(\.port)
+            ).count
+        } ?? 0
+        if !hasStableMetadata || (sharedProcessPorts > 1 && !argumentsContainPort) {
             components.append("port:\(context.port)")
         }
 
+        return digest(components)
+    }
+
+    private func digest(_ components: [String]) -> String {
         let digest = SHA256.hash(data: Data(components.joined(separator: "\u{1f}").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -178,6 +203,7 @@ struct RemoteServiceRecognitionPipeline {
             port: port,
             inventory: inventory,
             listener: listener,
+            processID: processPID,
             process: process,
             processChain: RemoteProcessResolver.processChain(
                 startingAt: processPID,

@@ -150,6 +150,64 @@ final class ServiceRecognitionTests: XCTestCase {
         XCTAssertEqual(first.forwardingKey, second.forwardingKey)
     }
 
+    func testDockerForwardingKeySurvivesImageChange() throws {
+        func inventory(image: String) -> String {
+            """
+            __USER__
+            501
+            __SS__
+            LISTEN 0 4096 127.0.0.1:12000 0.0.0.0:* users:(("docker-proxy",pid=111,fd=7)) ino:21
+            __DOCKER__
+            root-front|\(image)|127.0.0.1:12000->80/tcp|atlas|root-front
+            __PS__
+            111 1 0 root docker-proxy docker-proxy -host-port 12000 -container-port 80
+            __CWD__
+            """
+        }
+
+        let before = try XCTUnwrap(
+            TunnelEngine.services(
+                fromInventoryOutput: inventory(image: "registry.example/root-front:v1")
+            ).first
+        )
+        let after = try XCTUnwrap(
+            TunnelEngine.services(
+                fromInventoryOutput: inventory(image: "registry.example/root-front:v2")
+            ).first
+        )
+
+        XCTAssertEqual(before.forwardingKey, after.forwardingKey)
+    }
+
+    func testForwardingKeysDistinguishMultiplePortsOwnedByOneProcess() throws {
+        let output = """
+        __USER__
+        501
+        __SS__
+        LISTEN 0 4096 127.0.0.1:43875 0.0.0.0:* users:(("arc",pid=331,fd=7)) uid:501 ino:21
+        LISTEN 0 4096 127.0.0.1:43876 0.0.0.0:* users:(("arc",pid=331,fd=8)) uid:501 ino:22
+        __DOCKER__
+        __PS__
+        331 1 501 demo arc arc helper-daemon start --foreground
+        __CWD__
+        331|/home/demo
+        """
+
+        let automatic = TunnelEngine.services(fromInventoryOutput: output)
+        let automaticByPort = Dictionary(uniqueKeysWithValues: automatic.map { ($0.port, $0) })
+        let first = try XCTUnwrap(automaticByPort[43875])
+        let second = try XCTUnwrap(automaticByPort[43876])
+        XCTAssertNotEqual(first.forwardingKey, second.forwardingKey)
+
+        let overridden = TunnelEngine.services(
+            fromInventoryOutput: output,
+            forwardingPreferences: [first.forwardingKey: .included]
+        )
+        let overriddenByPort = Dictionary(uniqueKeysWithValues: overridden.map { ($0.port, $0) })
+        XCTAssertTrue(try XCTUnwrap(overriddenByPort[43875]).isForwardingEnabled)
+        XCTAssertFalse(try XCTUnwrap(overriddenByPort[43876]).isForwardingEnabled)
+    }
+
     func testInfersUniqueProcessFromUIDAndPortWhenSSCannotExposePID() throws {
         let output = """
         __USER__
