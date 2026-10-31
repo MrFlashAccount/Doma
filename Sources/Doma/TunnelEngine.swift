@@ -109,6 +109,7 @@ enum TunnelEngine {
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=3",
             "-o", "TCPKeepAlive=yes",
+            "-o", "ConnectTimeout=10",
             "-o", "BatchMode=\(authentication.batchMode)",
             "-o", "NumberOfPasswordPrompts=1",
         ]
