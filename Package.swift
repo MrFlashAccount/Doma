@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "Doma",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     products: [
         .executable(name: "Doma", targets: ["Doma"]),
         .executable(name: "DomaAskPass", targets: ["DomaAskPass"]),
