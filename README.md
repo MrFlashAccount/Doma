@@ -10,7 +10,7 @@
     <a href="https://github.com/MrFlashAccount/Doma/releases/latest">
       <img src="https://img.shields.io/github/v/release/MrFlashAccount/Doma?display_name=tag&sort=semver&label=Download&color=3B82F6" alt="Download the latest Doma release">
     </a>
-    <img src="https://img.shields.io/badge/macOS-14%2B-2F3136" alt="Requires macOS 14 or newer">
+    <img src="https://img.shields.io/badge/macOS-26%2B-2F3136" alt="Requires macOS 26 or newer">
   </p>
 </div>
 

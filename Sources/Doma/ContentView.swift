@@ -44,6 +44,118 @@ private enum ServiceSegment: String, CaseIterable, Identifiable {
     }
 }
 
+private enum ServiceListItem: Identifiable {
+    enum ID: Hashable {
+        case group(String)
+        case service(String, Int)
+    }
+
+    case group(name: String, serviceCount: Int, isFirst: Bool)
+    case service(RemoteService)
+
+    var id: ID {
+        switch self {
+        case let .group(name, _, _):
+            .group(name)
+        case let .service(service):
+            .service(service.group, service.port)
+        }
+    }
+}
+
+private struct HoverableServiceRow<Content: View>: View {
+    @State private var isHovered = false
+    private let content: (Bool) -> Content
+
+    init(@ViewBuilder content: @escaping (Bool) -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        content(isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+
+private final class BorderlessSearchFieldCell: NSSearchFieldCell {
+    override func searchTextRect(forBounds rect: NSRect) -> NSRect {
+        var textRect = super.searchTextRect(forBounds: rect)
+        textRect.origin.x += 10
+        textRect.size.width = max(0, textRect.size.width - 10)
+        return textRect
+    }
+}
+
+private struct NativeSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let prompt: String
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onCancel: onCancel)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let searchField = NSSearchField()
+        let searchCell = BorderlessSearchFieldCell(textCell: "")
+        searchCell.resetSearchButtonCell()
+        searchCell.resetCancelButtonCell()
+        searchField.cell = searchCell
+        searchField.placeholderString = prompt
+        searchField.delegate = context.coordinator
+        searchField.sendsSearchStringImmediately = true
+        searchField.isBezeled = false
+        searchField.drawsBackground = false
+        searchField.focusRingType = .none
+        searchField.controlSize = .large
+        searchField.font = .systemFont(ofSize: NSFont.systemFontSize)
+        searchField.setAccessibilityLabel("Фильтр сервисов")
+        return searchField
+    }
+
+    func updateNSView(_ searchField: NSSearchField, context: Context) {
+        context.coordinator.text = $text
+        context.coordinator.onCancel = onCancel
+
+        if searchField.stringValue != text {
+            searchField.stringValue = text
+        }
+
+        guard !context.coordinator.didRequestFocus else { return }
+        context.coordinator.didRequestFocus = true
+        DispatchQueue.main.async { [weak searchField] in
+            guard let searchField else { return }
+            searchField.window?.makeFirstResponder(searchField)
+        }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var text: Binding<String>
+        var onCancel: () -> Void
+        var didRequestFocus = false
+
+        init(text: Binding<String>, onCancel: @escaping () -> Void) {
+            self.text = text
+            self.onCancel = onCancel
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let searchField = notification.object as? NSSearchField else { return }
+            text.wrappedValue = searchField.stringValue
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+            onCancel()
+            return true
+        }
+    }
+}
+
 struct ContentView: View {
     @ObservedObject var manager: TunnelManager
     @ObservedObject var updates: UpdateController
@@ -51,7 +163,7 @@ struct ContentView: View {
 
     @State private var query = ""
     @State private var selectedSegment: ServiceSegment = .active
-    @State private var hoveredPort: Int?
+    @State private var isSearchPresented = false
     @State private var isHostMenuHovered = false
     @State private var collapsedGroups = Set<String>()
     @State private var dismissedConnectionError: String?
@@ -59,11 +171,8 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            overview
             connectionFailureBanner
-            serviceControls
-            serviceList
-            footer
+            serviceBrowser
         }
         .frame(width: 400, height: 560)
         .onAppear {
@@ -110,12 +219,7 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 hostMenu
-                Text(connectionSummary)
-                    .font(.caption)
-                    .foregroundStyle(connectionSummaryColor)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(connectionSummary)
+                headerDetail
             }
 
             Spacer(minLength: 12)
@@ -133,10 +237,25 @@ struct ContentView: View {
             ) {
                 manager.reconnect()
             }
+
+            moreMenu
         }
         .padding(.horizontal, 16)
         .padding(.top, 15)
         .padding(.bottom, 11)
+    }
+
+    private var headerDetail: some View {
+        HStack(spacing: 4) {
+            Image(systemName: headerDetailSymbol)
+                .font(.system(size: 9, weight: .semibold))
+            Text(headerDetailText)
+        }
+        .font(.caption)
+        .foregroundStyle(headerDetailColor)
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .help(headerDetailHelp)
     }
 
     private var hostMenu: some View {
@@ -186,41 +305,6 @@ struct ContentView: View {
         }
         .animation(.easeOut(duration: 0.12), value: isHostMenuHovered)
         .accessibilityLabel("SSH сервер: \(manager.selectedHost)")
-    }
-
-    private var overview: some View {
-        HStack(spacing: 10) {
-            metric(
-                value: manager.activeCount,
-                label: "проброшено",
-                color: .green
-            )
-
-            metric(
-                value: manager.services.count(where: { !$0.isForwardingEnabled }),
-                label: "выключено",
-                color: .gray
-            )
-
-            metric(
-                value: manager.conflictCount,
-                label: conflictMetricLabel,
-                color: manager.conflictCount == 0 ? .gray : .orange
-            )
-
-            Spacer()
-
-            Text("\(manager.remoteCount) на сервере")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 9)
-        .background(Color.primary.opacity(0.035))
-        .overlay(alignment: .bottom) {
-            separator
-                .allowsHitTesting(false)
-        }
     }
 
     @ViewBuilder
@@ -289,64 +373,142 @@ struct ContentView: View {
         }
     }
 
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.tertiary)
-            TextField("Фильтр по имени, проекту или порту", text: $query)
-                .textFieldStyle(.plain)
-                .font(.callout)
-            if !query.isEmpty {
-                Button {
-                    query = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Очистить фильтр")
+    private var serviceBrowser: some View {
+        serviceList
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                serviceNavigation
             }
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 32)
-        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .help("Поиск в разделе «\(selectedSegment.title)»")
     }
 
-    private var serviceControls: some View {
-        VStack(spacing: 8) {
-            Picker("Раздел сервисов", selection: $selectedSegment) {
-                ForEach(ServiceSegment.allCases) { segment in
-                    Text("\(segment.title) \(serviceCount(in: segment))")
-                        .tag(segment)
+    private var serviceNavigation: some View {
+        GlassEffectContainer(spacing: 10) {
+            HStack(spacing: 10) {
+                if isSearchPresented {
+                    nativeSearchField
+                } else {
+                    serviceTabBar
+                }
+                searchButton
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+        .animation(.snappy(duration: 0.28), value: isSearchPresented)
+    }
+
+    private var serviceTabBar: some View {
+        HStack(spacing: 2) {
+            ForEach(ServiceSegment.allCases) { segment in
+                let isSelected = selectedSegment == segment
+
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) {
+                        selectedSegment = segment
+                    }
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: segment.symbol)
+                            .font(.system(size: 13, weight: .semibold))
+
+                        Text("\(segment.title) \(serviceCount(in: segment))")
+                            .font(.caption2.weight(.medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                    }
+                    .foregroundStyle(isSelected ? Color.white : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
+                    .background {
+                        if isSelected {
+                            Capsule()
+                                .fill(Color.accentColor)
+                        }
+                    }
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(segment.title)
+                .accessibilityValue("\(serviceCount(in: segment))")
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+        .padding(4)
+        .frame(maxWidth: .infinity)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .glassEffectTransition(.materialize)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Раздел сервисов")
+    }
+
+    private var nativeSearchField: some View {
+        NativeSearchField(
+            text: $query,
+            prompt: "Имя, проект или порт",
+            onCancel: closeSearch
+        )
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
+        .frame(height: 48)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .glassEffectTransition(.materialize)
+    }
+
+    private var searchButton: some View {
+        Button {
+            if isSearchPresented {
+                closeSearch()
+            } else {
+                withAnimation(.snappy(duration: 0.28)) {
+                    isSearchPresented = true
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .controlSize(.small)
-            .accessibilityLabel("Раздел сервисов")
-            .accessibilityValue(selectedSegment.title)
-
-            searchField
+        } label: {
+            Image(systemName: isSearchPresented ? "xmark" : "magnifyingglass")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 48, height: 48)
+                .contentShape(Circle())
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .glassEffect(.regular.interactive(), in: .circle)
+        .accessibilityLabel(isSearchPresented ? "Закрыть поиск" : "Поиск")
+        .help(isSearchPresented ? "Закрыть поиск" : "Поиск сервисов")
+    }
+
+    private func closeSearch() {
+        query = ""
+        withAnimation(.snappy(duration: 0.28)) {
+            isSearchPresented = false
+        }
     }
 
     private var serviceList: some View {
-        Group {
-            if filteredGroups.isEmpty {
+        let groups = filteredGroups
+        let items = serviceListItems(from: groups)
+
+        return Group {
+            if groups.isEmpty {
                 ContentUnavailableView(
                     emptyStateTitle,
-                    systemImage: query.isEmpty ? selectedSegment.symbol : "magnifyingglass",
+                    systemImage: isSearchPresented ? "magnifyingglass" : selectedSegment.symbol,
                     description: Text(emptyStateDescription)
                 )
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(filteredGroups, id: \.0) { group, services in
-                            serviceGroup(group, services: services)
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(items) { item in
+                            switch item {
+                            case let .group(name, serviceCount, isFirst):
+                                serviceGroupHeader(
+                                    name,
+                                    serviceCount: serviceCount,
+                                    topPadding: isFirst ? 0 : 12
+                                )
+                            case let .service(service):
+                                serviceRow(service)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
                         }
                     }
                     .padding(.horizontal, 10)
@@ -358,178 +520,152 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var footer: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "lock.fill")
-                .font(.system(size: 9, weight: .semibold))
-            Text("127.0.0.1")
-                .font(.caption.monospaced())
-            Text("·")
-            Text(lastSyncText)
-                .font(.caption)
+    private var moreMenu: some View {
+        Menu {
+            Toggle("Запускать при входе", isOn: launchAtLoginBinding)
 
-            Spacer()
-
-            Menu {
-                Toggle("Запускать при входе", isOn: launchAtLoginBinding)
-
-                if launchAtLogin.requiresApproval {
-                    Button {
-                        launchAtLogin.openLoginItemsSettings()
-                    } label: {
-                        Label("Разрешить автозапуск…", systemImage: "gear")
-                    }
-                }
-
-                Divider()
-
+            if launchAtLogin.requiresApproval {
                 Button {
-                    updates.performPrimaryAction()
+                    launchAtLogin.openLoginItemsSettings()
                 } label: {
-                    if let version = updates.availableVersion {
-                        Label("Обновить \(version)…", systemImage: "arrow.down.circle.fill")
-                    } else if updates.isCheckingForUpdates {
-                        Label("Проверяем обновления…", systemImage: "arrow.triangle.2.circlepath")
-                    } else {
-                        Text("Проверить обновления…")
-                    }
+                    Label("Разрешить автозапуск…", systemImage: "gear")
                 }
-                .disabled(!updates.canCheckForUpdates || updates.isCheckingForUpdates)
-
-                Divider()
-
-                Button("Выйти из Doma", role: .destructive) {
-                    manager.quit()
-                }
-            } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: "ellipsis")
-
-                    if updates.availableVersion != nil {
-                        Circle()
-                            .fill(.orange)
-                            .frame(width: 6, height: 6)
-                            .offset(x: 1, y: -1)
-                    }
-                }
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
             }
-            .menuIndicator(.hidden)
-            .controlSize(.small)
-            .buttonBorderShape(.circle)
-            .domaGlassButtonStyle()
-            .fixedSize()
-            .accessibilityLabel("Дополнительные действия")
+
+            Divider()
+
+            Button {
+                updates.performPrimaryAction()
+            } label: {
+                if let version = updates.availableVersion {
+                    Label("Обновить \(version)…", systemImage: "arrow.down.circle.fill")
+                } else if updates.isCheckingForUpdates {
+                    Label("Проверяем обновления…", systemImage: "arrow.triangle.2.circlepath")
+                } else {
+                    Text("Проверить обновления…")
+                }
+            }
+            .disabled(!updates.canCheckForUpdates || updates.isCheckingForUpdates)
+
+            Divider()
+
+            Button("Выйти из Doma", role: .destructive) {
+                manager.quit()
+            }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "ellipsis")
+
+                if updates.availableVersion != nil {
+                    Circle()
+                        .fill(.orange)
+                        .frame(width: 6, height: 6)
+                        .offset(x: 1, y: -1)
+                }
+            }
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
         }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
-        .frame(height: 38)
-        .overlay(alignment: .top) {
-            separator
-                .allowsHitTesting(false)
-        }
+        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Дополнительные действия")
     }
 
-    private func serviceGroup(_ group: String, services: [RemoteService]) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button {
-                withAnimation(.snappy(duration: 0.18)) {
-                    if collapsedGroups.contains(group) {
-                        collapsedGroups.remove(group)
-                    } else {
-                        collapsedGroups.insert(group)
-                    }
+    private func serviceGroupHeader(
+        _ group: String,
+        serviceCount: Int,
+        topPadding: CGFloat
+    ) -> some View {
+        Button {
+            withAnimation(.snappy(duration: 0.18)) {
+                if collapsedGroups.contains(group) {
+                    collapsedGroups.remove(group)
+                } else {
+                    collapsedGroups.insert(group)
                 }
-            } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isGroupExpanded(group) ? 90 : 0))
-
-                    Text(shortGroup(group))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    Text(services.count.formatted())
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-                .padding(.horizontal, 6)
-                .frame(height: 24)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(shortGroup(group))
-            .accessibilityValue(isGroupExpanded(group) ? "развернуто" : "свернуто")
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isGroupExpanded(group) ? 90 : 0))
 
-            if isGroupExpanded(group) {
-                ForEach(services) { service in
-                    serviceRow(service)
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                Text(shortGroup(group))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer()
+
+                Text(serviceCount.formatted())
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
             }
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .padding(.top, topPadding)
+        .accessibilityLabel(shortGroup(group))
+        .accessibilityValue(isGroupExpanded(group) ? "развернуто" : "свернуто")
     }
 
     private func serviceRow(_ service: RemoteService) -> some View {
-        HStack(spacing: 8) {
-            Button {
-                manager.openService(service)
-            } label: {
-                HStack(spacing: 9) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(kindColor(service.kind).opacity(0.11))
-                        Image(systemName: service.kind.symbol)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(kindColor(service.kind))
-                    }
-                    .frame(width: 26, height: 26)
+        HoverableServiceRow { isHovered in
+            HStack(spacing: 8) {
+                Button {
+                    manager.openService(service)
+                } label: {
+                    HStack(spacing: 9) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(kindColor(service.kind).opacity(0.11))
+                            Image(systemName: service.kind.symbol)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(kindColor(service.kind))
+                        }
+                        .frame(width: 26, height: 26)
 
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(service.name)
-                            .font(.system(size: 13.5, weight: .medium))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(service.name)
+                                .font(.system(size: 13.5, weight: .medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+
+                            Text(serviceForwardingSummary(service))
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(serviceForwardingSummaryColor(service))
+                                .lineLimit(1)
+                        }
+
+                        Spacer(minLength: 10)
+
+                        Text(String(service.port))
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
                             .foregroundStyle(.primary)
-                            .lineLimit(1)
-
-                        Text(serviceForwardingSummary(service))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(serviceForwardingSummaryColor(service))
-                            .lineLimit(1)
                     }
-
-                    Spacer(minLength: 10)
-
-                    Text(String(service.port))
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.primary)
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity)
-            .allowsHitTesting(service.isForwarded)
-            .focusable(service.isForwarded)
-            .help(serviceHelp(service))
-            .accessibilityLabel("\(service.name), порт \(service.port), \(serviceState(service))")
-            .accessibilityHidden(!service.isForwarded)
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .allowsHitTesting(service.isForwarded)
+                .focusable(service.isForwarded)
+                .help(serviceHelp(service))
+                .accessibilityLabel("\(service.name), порт \(service.port), \(serviceState(service))")
+                .accessibilityHidden(!service.isForwarded)
 
-            serviceAccessory(service)
-        }
-        .padding(.horizontal, 7)
-        .frame(height: 44)
-        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .background {
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(hoveredPort == service.port ? Color.primary.opacity(0.06) : .clear)
-        }
-        .onHover { isHovering in
-            hoveredPort = isHovering ? service.port : nil
+                serviceAccessory(service, isHovered: isHovered)
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 44)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(isHovered ? Color.primary.opacity(0.06) : .clear)
+            }
         }
         .contextMenu {
             Button {
@@ -579,33 +715,45 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func serviceAccessory(_ service: RemoteService) -> some View {
-        switch selectedSegment {
-        case .active:
-            activeServiceStatus(service)
-            excludeServiceButton(service)
-        case .available, .excluded:
-            includeServiceButton(service)
+    private func serviceAccessory(_ service: RemoteService, isHovered: Bool) -> some View {
+        if isSearchPresented {
+            if service.isForwardingEnabled {
+                activeServiceStatus(service, isHovered: isHovered)
+                excludeServiceButton(service)
+            } else {
+                includeServiceButton(service)
+            }
+        } else {
+            switch selectedSegment {
+            case .active:
+                activeServiceStatus(service, isHovered: isHovered)
+                excludeServiceButton(service)
+            case .available, .excluded:
+                includeServiceButton(service)
+            }
         }
     }
 
     @ViewBuilder
-    private func activeServiceStatus(_ service: RemoteService) -> some View {
-        if manager.changingForwardingPorts.contains(service.port) {
-            ProgressView()
-                .controlSize(.small)
-                .frame(width: 12, height: 12)
-                .help(service.isForwardingEnabled ? "Включаем проброс" : "Выключаем проброс")
-        } else if service.hasConflict {
-            conflictResolutionButton(service)
-        } else if hoveredPort == service.port && service.isForwarded {
-            Image(systemName: "arrow.up.right")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 12)
-        } else {
-            statusMark(service)
+    private func activeServiceStatus(_ service: RemoteService, isHovered: Bool) -> some View {
+        Group {
+            if manager.changingForwardingPorts.contains(service.port) {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 12, height: 12)
+                    .help(service.isForwardingEnabled ? "Включаем проброс" : "Выключаем проброс")
+            } else if service.hasConflict {
+                conflictResolutionButton(service)
+            } else if isHovered && service.isForwarded {
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12)
+            } else {
+                statusMark(service)
+            }
         }
+        .frame(width: 24, height: 24)
     }
 
     private func excludeServiceButton(_ service: RemoteService) -> some View {
@@ -691,36 +839,6 @@ struct ContentView: View {
         }
     }
 
-    private func metric(value: Int, label: String, color: Color) -> some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-            Text(value.formatted())
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(color)
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-    }
-
-    private var conflictMetricLabel: String {
-        let remainder100 = manager.conflictCount % 100
-        if 11 ... 14 ~= remainder100 {
-            return "конфликтов"
-        }
-        switch manager.conflictCount % 10 {
-        case 1:
-            return "конфликт"
-        case 2 ... 4:
-            return "конфликта"
-        default:
-            return "конфликтов"
-        }
-    }
-
     private func actionButton(title: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -734,14 +852,35 @@ struct ContentView: View {
     }
 
     private var filteredGroups: [(String, [RemoteService])] {
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let needle = isSearchPresented
+            ? query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            : ""
         return manager.groupedServices.compactMap { group, services in
             let filtered = services.filter { service in
-                serviceBelongsToSelectedSegment(service)
+                (isSearchPresented || serviceBelongsToSelectedSegment(service))
                     && (needle.isEmpty || serviceMatchesSearch(service, needle: needle))
             }
             return filtered.isEmpty ? nil : (group, filtered)
         }
+    }
+
+    private func serviceListItems(
+        from groups: [(String, [RemoteService])]
+    ) -> [ServiceListItem] {
+        var items: [ServiceListItem] = []
+        for (index, group) in groups.enumerated() {
+            items.append(
+                .group(
+                    name: group.0,
+                    serviceCount: group.1.count,
+                    isFirst: index == groups.startIndex
+                )
+            )
+            if isGroupExpanded(group.0) {
+                items.append(contentsOf: group.1.map(ServiceListItem.service))
+            }
+        }
+        return items
     }
 
     private func serviceCount(in segment: ServiceSegment) -> Int {
@@ -779,39 +918,49 @@ struct ContentView: View {
     }
 
     private func isGroupExpanded(_ group: String) -> Bool {
-        !collapsedGroups.contains(group) || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !collapsedGroups.contains(group)
+            || (isSearchPresented
+                && !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
-    private var connectionSummary: String {
+    private var headerDetailText: String {
         if let error = manager.lastError {
             return error
         }
         if let warning = manager.lastWarning {
             return warning
         }
-        switch manager.state {
-        case .connected:
-            return "\(manager.activeCount) из \(manager.remoteCount) портов"
-        case .connecting:
-            return "Устанавливаем соединение"
-        case .failed:
-            return "Соединение недоступно"
-        case .disconnected:
-            return "Не подключено"
-        }
+        return lastSyncText
     }
 
-    private var connectionSummaryColor: Color {
+    private var headerDetailSymbol: String {
+        if manager.lastError != nil { return "exclamationmark.triangle.fill" }
+        if manager.lastWarning != nil { return "exclamationmark.circle.fill" }
+        return "arrow.clockwise"
+    }
+
+    private var headerDetailColor: Color {
         if manager.lastError != nil { return .red }
         if manager.lastWarning != nil { return .orange }
         return .secondary
+    }
+
+    private var headerDetailHelp: String {
+        if manager.lastError != nil || manager.lastWarning != nil {
+            return headerDetailText
+        }
+        guard manager.lastSync != nil else { return "Синхронизация ещё не выполнялась" }
+        return "Последняя синхронизация: \(lastSyncText)"
     }
 
     private var emptyStateTitle: String {
         if manager.services.isEmpty, manager.state != .connected {
             return manager.state == .connecting ? "Подключаемся…" : "Сервисы недоступны"
         }
-        return query.isEmpty ? selectedSegment.emptyTitle : "Нет совпадений"
+        if isSearchPresented, !query.isEmpty {
+            return "Нет совпадений"
+        }
+        return selectedSegment.emptyTitle
     }
 
     private var emptyStateDescription: String {
@@ -820,21 +969,15 @@ struct ContentView: View {
                 ? "Сервисы появятся после подключения"
                 : "Выбери SSH сервер и подключись"
         }
-        if !query.isEmpty {
-            return "В разделе «\(selectedSegment.title)» ничего не найдено. Измени запрос или выбери другой раздел."
+        if isSearchPresented, !query.isEmpty {
+            return "Измени запрос или очисти поле поиска."
         }
         return selectedSegment.emptyDescription
     }
 
     private var lastSyncText: String {
-        guard let lastSync = manager.lastSync else { return "ещё не обновлялось" }
-        return "обновлено " + lastSync.formatted(date: .omitted, time: .shortened)
-    }
-
-    private var separator: some View {
-        Rectangle()
-            .fill(Color.primary.opacity(0.09))
-            .frame(height: 1)
+        guard let lastSync = manager.lastSync else { return "—" }
+        return lastSync.formatted(date: .omitted, time: .shortened)
     }
 
     private func shortGroup(_ group: String) -> String {
@@ -1030,12 +1173,7 @@ private enum DomaNativeDialog {
 }
 
 private extension View {
-    @ViewBuilder
     func domaGlassButtonStyle() -> some View {
-        if #available(macOS 26.0, *) {
-            buttonStyle(.glass)
-        } else {
-            buttonStyle(.bordered)
-        }
+        buttonStyle(.glass)
     }
 }
