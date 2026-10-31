@@ -335,6 +335,24 @@ final class RemoteInventoryMonitorTests: XCTestCase {
         }
     }
 
+    func testMasterConnectionAttemptHasBoundedNetworkTimeout() {
+        let arguments = TunnelEngine.masterArguments(
+            host: "devbox",
+            socket: "/tmp/doma-test.sock",
+            authentication: SSHAuthenticationConfiguration(batchMode: "no", environment: nil),
+            requiresExplicitConfirmation: false
+        )
+
+        XCTAssertTrue(arguments.containsConsecutive("-o", "ConnectTimeout=10"))
+    }
+
+    func testReconnectBackoffRemainsBoundedForLongNetworkOutages() {
+        XCTAssertEqual(ReconnectBackoff.delay(afterFailureCount: 1), 1)
+        XCTAssertEqual(ReconnectBackoff.delay(afterFailureCount: 5), 16)
+        XCTAssertEqual(ReconnectBackoff.delay(afterFailureCount: 6), 30)
+        XCTAssertEqual(ReconnectBackoff.delay(afterFailureCount: 10_000), 30)
+    }
+
     func testSSHAuthenticationFailureIsNotMistakenForRemotePermissionFailure() {
         let termination = RemoteAccessErrorFormatter.monitorTermination(
             host: "devbox",

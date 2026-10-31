@@ -5,7 +5,6 @@ import Foundation
 final class TunnelManager: ObservableObject {
     private static let fullResyncInterval: TimeInterval = 300
     private static let conflictRetryInterval: TimeInterval = 15
-    private static let maxReconnectAttempts = 5
 
     @Published private(set) var hosts: [SSHHost] = []
     @Published private(set) var selectedHost = ""
@@ -45,7 +44,6 @@ final class TunnelManager: ObservableObject {
     private var shutdownCompletions: [@MainActor () -> Void] = []
     private var syncPending = false
     private var reconnectAttempt = 0
-    private var reconnectBudgetHost: String?
     private var isShuttingDown = false
 
     init(
@@ -219,7 +217,7 @@ final class TunnelManager: ObservableObject {
         stopMonitoring()
         selectedHost = alias
         UserDefaults.standard.set(alias, forKey: "selectedHost")
-        resetReconnectBudget(for: alias)
+        resetReconnectBackoff()
         resetRuntime()
 
         let generation = UUID()
@@ -238,7 +236,7 @@ final class TunnelManager: ObservableObject {
     func reconnect() {
         guard !selectedHost.isEmpty, recoveryTask == nil else { return }
         let host = selectedHost
-        resetReconnectBudget(for: host)
+        resetReconnectBackoff()
         stopMonitoring()
         state = .connecting
         resetRuntime(keepState: true)
@@ -513,18 +511,8 @@ final class TunnelManager: ObservableObject {
 
     private func scheduleReconnect(for host: String) {
         guard selectedHost == host, !isShuttingDown, reconnectTask == nil else { return }
-        if reconnectBudgetHost != host {
-            reconnectBudgetHost = host
-            reconnectAttempt = 0
-        }
-        guard reconnectAttempt < Self.maxReconnectAttempts else {
-            if let lastError, !lastError.contains("Повтори подключение вручную") {
-                self.lastError = lastError + "\n\nАвтоматические попытки остановлены. Проверь сеть и повтори подключение вручную."
-            }
-            return
-        }
-        reconnectAttempt += 1
-        let delay = min(30, 1 << min(reconnectAttempt - 1, 5))
+        reconnectAttempt = min(reconnectAttempt + 1, ReconnectBackoff.maximumBackoffStep)
+        let delay = ReconnectBackoff.delay(afterFailureCount: reconnectAttempt)
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled, selectedHost == host, !isShuttingDown else { return }
@@ -650,7 +638,6 @@ final class TunnelManager: ObservableObject {
             }
         } else {
             reconnectAttempt = 0
-            reconnectBudgetHost = host
         }
     }
 
@@ -691,8 +678,7 @@ final class TunnelManager: ObservableObject {
         }
     }
 
-    private func resetReconnectBudget(for host: String) {
-        reconnectBudgetHost = host
+    private func resetReconnectBackoff() {
         reconnectAttempt = 0
     }
 
@@ -728,6 +714,15 @@ final class TunnelManager: ObservableObject {
         if !keepState {
             state = .disconnected
         }
+    }
+}
+
+enum ReconnectBackoff {
+    static let maximumBackoffStep = 6
+
+    static func delay(afterFailureCount failureCount: Int) -> TimeInterval {
+        let attempt = min(max(failureCount, 1), maximumBackoffStep)
+        return TimeInterval(min(30, 1 << (attempt - 1)))
     }
 }
 
