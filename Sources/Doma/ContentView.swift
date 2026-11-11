@@ -86,6 +86,35 @@ private final class BorderlessSearchFieldCell: NSSearchFieldCell {
     }
 }
 
+final class DomaSearchField: NSSearchField {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        let searchCell = BorderlessSearchFieldCell(textCell: "")
+        searchCell.resetSearchButtonCell()
+        searchCell.resetCancelButtonCell()
+        cell = searchCell
+
+        // A newly created NSSearchFieldCell is not editable or selectable by default.
+        isEditable = true
+        isSelectable = true
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        guard let targetWindow = window else { return }
+        DispatchQueue.main.async { [weak self, weak targetWindow] in
+            guard let self, let targetWindow, self.window === targetWindow else { return }
+            targetWindow.makeFirstResponder(self)
+        }
+    }
+}
+
 private struct NativeSearchField: NSViewRepresentable {
     @Binding var text: String
     let prompt: String
@@ -96,11 +125,7 @@ private struct NativeSearchField: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSSearchField {
-        let searchField = NSSearchField()
-        let searchCell = BorderlessSearchFieldCell(textCell: "")
-        searchCell.resetSearchButtonCell()
-        searchCell.resetCancelButtonCell()
-        searchField.cell = searchCell
+        let searchField = DomaSearchField()
         searchField.placeholderString = prompt
         searchField.delegate = context.coordinator
         searchField.sendsSearchStringImmediately = true
@@ -120,19 +145,11 @@ private struct NativeSearchField: NSViewRepresentable {
         if searchField.stringValue != text {
             searchField.stringValue = text
         }
-
-        guard !context.coordinator.didRequestFocus else { return }
-        context.coordinator.didRequestFocus = true
-        DispatchQueue.main.async { [weak searchField] in
-            guard let searchField else { return }
-            searchField.window?.makeFirstResponder(searchField)
-        }
     }
 
     final class Coordinator: NSObject, NSSearchFieldDelegate {
         var text: Binding<String>
         var onCancel: () -> Void
-        var didRequestFocus = false
 
         init(text: Binding<String>, onCancel: @escaping () -> Void) {
             self.text = text
