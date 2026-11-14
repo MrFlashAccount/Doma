@@ -77,54 +77,66 @@ private struct HoverableServiceRow<Content: View>: View {
     }
 }
 
-private final class BorderlessSearchFieldCell: NSSearchFieldCell {
-    override func searchTextRect(forBounds rect: NSRect) -> NSRect {
-        var textRect = super.searchTextRect(forBounds: rect)
-        textRect.origin.x += 10
-        textRect.size.width = max(0, textRect.size.width - 10)
-        return textRect
-    }
-}
-
 final class DomaSearchField: NSSearchField {
+    var onMoveToWindow: ((DomaSearchField) -> Void)?
+    private var isFocusRequestScheduled = false
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-
-        let searchCell = BorderlessSearchFieldCell(textCell: "")
-        searchCell.resetSearchButtonCell()
-        searchCell.resetCancelButtonCell()
-        cell = searchCell
-
-        // A newly created NSSearchFieldCell is not editable or selectable by default.
-        isEditable = true
-        isSelectable = true
+        removeBuiltInSearchIcon()
     }
 
     required init?(coder: NSCoder) {
-        nil
+        super.init(coder: coder)
+        removeBuiltInSearchIcon()
+    }
+
+    private func removeBuiltInSearchIcon() {
+        (cell as? NSSearchFieldCell)?.searchButtonCell = nil
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        onMoveToWindow?(self)
+    }
 
-        guard let targetWindow = window else { return }
-        DispatchQueue.main.async { [weak self, weak targetWindow] in
-            guard let self, let targetWindow, self.window === targetWindow else { return }
-            targetWindow.makeFirstResponder(self)
+    func requestFocus(completion: @escaping (Bool) -> Void) {
+        guard !isFocusRequestScheduled, let targetWindow = window else {
+            completion(false)
+            return
         }
+        isFocusRequestScheduled = true
+        DispatchQueue.main.async { [weak self, weak targetWindow] in
+            guard let self else { return }
+            self.isFocusRequestScheduled = false
+            guard let targetWindow,
+                  self.window === targetWindow,
+                  targetWindow.makeFirstResponder(self)
+            else {
+                completion(false)
+                return
+            }
+            completion(self.currentEditor() != nil)
+        }
+    }
+
+    func applyExternalText(_ text: String) {
+        guard currentEditor() == nil, stringValue != text else { return }
+        stringValue = text
     }
 }
 
 private struct NativeSearchField: NSViewRepresentable {
     @Binding var text: String
+    @Binding var focusRequested: Bool
     let prompt: String
     let onCancel: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, onCancel: onCancel)
+        Coordinator(text: $text, focusRequested: $focusRequested, onCancel: onCancel)
     }
 
-    func makeNSView(context: Context) -> NSSearchField {
+    func makeNSView(context: Context) -> DomaSearchField {
         let searchField = DomaSearchField()
         searchField.placeholderString = prompt
         searchField.delegate = context.coordinator
@@ -135,25 +147,42 @@ private struct NativeSearchField: NSViewRepresentable {
         searchField.controlSize = .large
         searchField.font = .systemFont(ofSize: NSFont.systemFontSize)
         searchField.setAccessibilityLabel("Фильтр сервисов")
+        searchField.onMoveToWindow = { [weak coordinator = context.coordinator] searchField in
+            coordinator?.requestFocusIfNeeded(for: searchField)
+        }
         return searchField
     }
 
-    func updateNSView(_ searchField: NSSearchField, context: Context) {
+    func updateNSView(_ searchField: DomaSearchField, context: Context) {
         context.coordinator.text = $text
+        context.coordinator.focusRequested = $focusRequested
         context.coordinator.onCancel = onCancel
 
-        if searchField.stringValue != text {
-            searchField.stringValue = text
-        }
+        searchField.applyExternalText(text)
+        context.coordinator.requestFocusIfNeeded(for: searchField)
     }
 
     final class Coordinator: NSObject, NSSearchFieldDelegate {
         var text: Binding<String>
+        var focusRequested: Binding<Bool>
         var onCancel: () -> Void
 
-        init(text: Binding<String>, onCancel: @escaping () -> Void) {
+        init(
+            text: Binding<String>,
+            focusRequested: Binding<Bool>,
+            onCancel: @escaping () -> Void
+        ) {
             self.text = text
+            self.focusRequested = focusRequested
             self.onCancel = onCancel
+        }
+
+        func requestFocusIfNeeded(for searchField: DomaSearchField) {
+            guard focusRequested.wrappedValue else { return }
+            searchField.requestFocus { [weak self] didFocus in
+                guard didFocus else { return }
+                self?.focusRequested.wrappedValue = false
+            }
         }
 
         func controlTextDidChange(_ notification: Notification) {
@@ -181,6 +210,7 @@ struct ContentView: View {
     @State private var query = ""
     @State private var selectedSegment: ServiceSegment = .active
     @State private var isSearchPresented = false
+    @State private var isSearchFocusRequested = false
     @State private var isHostMenuHovered = false
     @State private var collapsedGroups = Set<String>()
     @State private var dismissedConnectionError: String?
@@ -391,10 +421,12 @@ struct ContentView: View {
     }
 
     private var serviceBrowser: some View {
-        serviceList
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                serviceNavigation
-            }
+        ZStack {
+            serviceList
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            serviceNavigation
+        }
     }
 
     private var serviceNavigation: some View {
@@ -459,12 +491,21 @@ struct ContentView: View {
     }
 
     private var nativeSearchField: some View {
-        NativeSearchField(
-            text: $query,
-            prompt: "Имя, проект или порт",
-            onCancel: closeSearch
-        )
-        .padding(.horizontal, 12)
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.secondary)
+                .allowsHitTesting(false)
+
+            NativeSearchField(
+                text: $query,
+                focusRequested: $isSearchFocusRequested,
+                prompt: "Имя, проект или порт",
+                onCancel: closeSearch
+            )
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 16)
         .frame(maxWidth: .infinity)
         .frame(height: 48)
         .glassEffect(.regular.interactive(), in: .capsule)
@@ -476,6 +517,7 @@ struct ContentView: View {
             if isSearchPresented {
                 closeSearch()
             } else {
+                isSearchFocusRequested = true
                 withAnimation(.snappy(duration: 0.28)) {
                     isSearchPresented = true
                 }
@@ -495,6 +537,7 @@ struct ContentView: View {
 
     private func closeSearch() {
         query = ""
+        isSearchFocusRequested = false
         withAnimation(.snappy(duration: 0.28)) {
             isSearchPresented = false
         }
